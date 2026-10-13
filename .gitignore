@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+temp_audio.wav
+reply.mp3
+player_region.json
