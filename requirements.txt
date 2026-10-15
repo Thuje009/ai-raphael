@@ -1,0 +1,15 @@
+numpy
+opencv-python
+mss
+pyautogui
+PyGetWindow
+sounddevice
+SpeechRecognition
+gTTS
+edge-tts
+scipy
+yt-dlp
+requests
+google-genai
+pyperclip
+python-dotenv

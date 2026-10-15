@@ -1,24 +1,35 @@
 import os
 import time
 import threading
+
 import cv2
 import mss
 import numpy as np
 import pyautogui
 import pygetwindow as gw
-from config import (SKIP_DIR, SKIP_IMAGE, IMAGE_EXTS, MONITOR_INDEX, 
-                    SCALES, REQUIRE_YOUTUBE_FOREGROUND, DEBUG_AD_SKIPPER, 
-                    MATCH_THRESHOLD, CLICK_COOLDOWN)
+
+from common import GUI_LOCK
+from config import (SKIP_DIR, SKIP_IMAGE, IMAGE_EXTS, MONITOR_INDEX, SCALES,
+                    REQUIRE_YOUTUBE_FOREGROUND, CROP_TO_WINDOW, DEBUG_AD_SKIPPER,
+                    MATCH_THRESHOLD, CLICK_COOLDOWN, CLICK_OFFSET_X, CLICK_OFFSET_Y)
 
 skipper_stop = threading.Event()
 skipper_thread = None
 
-def youtube_is_foreground():
+
+def get_target_window():
+    """คืน (ทำงานต่อได้ไหม, หน้าต่างที่ active)
+    ถ้าไม่บังคับว่า YouTube ต้องอยู่หน้าสุด หรืออ่านหน้าต่างไม่ได้ จะสแกนทั้งจอ"""
+    if not REQUIRE_YOUTUBE_FOREGROUND:
+        return True, None
     try:
         w = gw.getActiveWindow()
-        return bool(w and w.title and "youtube" in w.title.lower())
     except Exception:
-        return True
+        return True, None
+    if w and w.title and "youtube" in w.title.lower():
+        return True, w
+    return False, None
+
 
 def list_template_files():
     files = []
@@ -28,6 +39,7 @@ def list_template_files():
     if os.path.isfile(SKIP_IMAGE):
         files.append(SKIP_IMAGE)
     return files
+
 
 def load_templates():
     loaded = []
@@ -47,18 +59,44 @@ def load_templates():
             loaded.append((name, variants))
     return loaded
 
-def match_templates(roi_gray, templates):
-    best_val, best_loc, best_size, best_name = 0.0, None, (0, 0), ""
+
+def capture_region(sct, monitor, win):
+    """จับภาพเฉพาะส่วนที่จำเป็น (หน้าต่าง YouTube ∩ จอที่เลือก) คืนภาพเทา + พิกัดมุมซ้ายบนบนจอ"""
+    left, top = monitor["left"], monitor["top"]
+    right, bottom = left + monitor["width"], top + monitor["height"]
+    if win is not None and CROP_TO_WINDOW:
+        l, t = max(win.left, left), max(win.top, top)
+        r, b = min(win.left + win.width, right), min(win.top + win.height, bottom)
+        if r - l >= 100 and b - t >= 100:          # หน้าต่างอยู่คนละจอ/เล็กผิดปกติ -> ใช้ทั้งจอแทน
+            left, top, right, bottom = l, t, r, b
+    area = {"left": left, "top": top, "width": right - left, "height": bottom - top}
+    gray = cv2.cvtColor(np.array(sct.grab(area)), cv2.COLOR_BGRA2GRAY)
+    return gray, left, top
+
+
+def match_templates(roi_gray, templates, hint=None):
+    """คืน (คะแนน, ตำแหน่ง, ขนาด, ชื่อ, hint) หยุดทันทีเมื่อเจอที่ผ่านเกณฑ์
+    hint = (เทมเพลต, สเกล) ที่เจอครั้งก่อน จะถูกลองก่อนเพื่อความเร็ว"""
     rh, rw = roi_gray.shape[:2]
-    for name, variants in templates:
-        for t, tw, th in variants:
-            if th > rh or tw > rw:
-                continue
-            res = cv2.matchTemplate(roi_gray, t, cv2.TM_CCOEFF_NORMED)
-            _, mv, _, ml = cv2.minMaxLoc(res)
-            if mv > best_val:
-                best_val, best_loc, best_size, best_name = mv, ml, (tw, th), name
-    return best_val, best_loc, best_size, best_name
+    order = [(ti, vi) for ti, (_n, variants) in enumerate(templates) for vi in range(len(variants))]
+    if hint in order:
+        order.remove(hint)
+        order.insert(0, hint)
+
+    best = (0.0, None, (0, 0), "", None)
+    for ti, vi in order:
+        name, variants = templates[ti]
+        t, tw, th = variants[vi]
+        if th > rh or tw > rw:
+            continue
+        res = cv2.matchTemplate(roi_gray, t, cv2.TM_CCOEFF_NORMED)
+        _, mv, _, ml = cv2.minMaxLoc(res)
+        if mv > best[0]:
+            best = (mv, ml, (tw, th), name, (ti, vi))
+            if mv >= MATCH_THRESHOLD:
+                break
+    return best
+
 
 def auto_skip_ads_loop():
     print("👀 RAPHAEL: เริ่มระบบข้ามโฆษณาแล้วค่ะ")
@@ -68,36 +106,36 @@ def auto_skip_ads_loop():
         return
 
     last_click_time = 0.0
+    last_debug_time = 0.0
+    hint = None
     with mss.mss() as sct:
         while not skipper_stop.is_set():
             try:
-                if REQUIRE_YOUTUBE_FOREGROUND and not youtube_is_foreground():
+                ok, win = get_target_window()
+                if not ok:
                     skipper_stop.wait(1)
                     continue
 
                 monitor = sct.monitors[MONITOR_INDEX]
-                screen_np = np.array(sct.grab(monitor))
-                screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_BGRA2GRAY)
-
-                best_val, best_loc, best_size, best_name = match_templates(screen_gray, templates)
+                roi, left, top = capture_region(sct, monitor, win)
+                best_val, best_loc, best_size, best_name, hint = match_templates(roi, templates, hint)
                 now = time.time()
+
+                if DEBUG_AD_SKIPPER and 0.6 <= best_val < MATCH_THRESHOLD and now - last_debug_time > 2:
+                    print(f"🔍 AdSkipper: คะแนนสูงสุด {best_val:.2f} ({best_name}) ยังไม่ถึงเกณฑ์ {MATCH_THRESHOLD}")
+                    last_debug_time = now
 
                 if best_val >= MATCH_THRESHOLD and best_loc is not None:
                     if now - last_click_time > CLICK_COOLDOWN:
                         tw, th = best_size
-                        cx = best_loc[0] + tw // 2 + monitor["left"]
-                        cy = best_loc[1] + th // 2 + monitor["top"]
-                        
-                        # สามารถปรับ Offset ตรงนี้ได้ทันทีถ้าพิกัดเคลื่อน
-                        OFFSET_X = -270
-                        OFFSET_Y = -150
-                        cx += OFFSET_X
-                        cy += OFFSET_Y
+                        cx = left + best_loc[0] + tw // 2 + CLICK_OFFSET_X
+                        cy = top + best_loc[1] + th // 2 + CLICK_OFFSET_Y
 
-                        print(f"🎯 พบปุ่มข้ามโฆษณา! ที่ X:{cx} Y:{cy}")
-                        old_pos = pyautogui.position()
-                        pyautogui.click(cx, cy)
-                        pyautogui.moveTo(old_pos)
+                        print(f"🎯 พบปุ่มข้ามโฆษณา! ({best_name}, {best_val:.2f}) ที่ X:{cx} Y:{cy}")
+                        with GUI_LOCK:
+                            old_pos = pyautogui.position()
+                            pyautogui.click(cx, cy)
+                            pyautogui.moveTo(old_pos)
                         last_click_time = now
                         print("⏭️ RAPHAEL: กดข้ามโฆษณาแล้ว")
 
@@ -105,6 +143,7 @@ def auto_skip_ads_loop():
             except Exception as e:
                 print(f"⚠️ AdSkipper Error: {e}")
                 skipper_stop.wait(2)
+
 
 def start_auto_skip_ads():
     global skipper_thread
@@ -118,6 +157,7 @@ def start_auto_skip_ads():
     skipper_thread = threading.Thread(target=auto_skip_ads_loop, daemon=True, name="Raphael-AdSkipper")
     skipper_thread.start()
     return True
+
 
 def stop_auto_skip_ads():
     skipper_stop.set()
