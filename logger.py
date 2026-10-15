@@ -2,6 +2,7 @@ import os
 import json
 from config import BASE_DIR
 
+
 LOG_FILE = os.path.join(BASE_DIR, "unknown_commands.json")
 
 def log_unknown_command(text):

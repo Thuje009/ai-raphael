@@ -31,12 +31,18 @@ def main():
                     if handle_command(intent_result, actual_command):
                         break
                 else:
-                    speak("ครับ มีอะไรให้ช่วยไหมครับ")
-                    follow_up = record_and_recognize("พูดคำสั่งได้เลย...")
-                    if follow_up:
-                        intent_result = interpret(strip_wake_words(follow_up))
-                        if handle_command(intent_result):
-                            break
+                        speak("ครับ มีอะไรให้ช่วยไหมครับ")
+                        follow_up = record_and_recognize("พูดคำสั่งได้เลย (ไม่ต้องเรียกชื่อ)...")
+                        if follow_up:
+                            # เก็บข้อความดิบไว้ก่อนตัดคำ
+                            raw_follow_up = strip_wake_words(follow_up)
+                            
+                            intent_result = interpret(raw_follow_up)
+                            print(f"🤖 ผลลัพธ์: {intent_result}")
+                            
+                            # ส่ง raw_follow_up เข้าไปให้ handle_command บันทึก Log ด้วย
+                            if handle_command(intent_result, raw_follow_up):
+                                break
     except KeyboardInterrupt:
         print("\n👋 หยุดการทำงานด้วย Ctrl+C")
     finally:

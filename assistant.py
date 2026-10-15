@@ -10,6 +10,7 @@ from google.genai import types
 from config import GEMINI_API_KEY, GEMINI_MODELS, PREFER_GEMINI, WAKE_WORDS
 from speech import speak, record_and_recognize
 from logger import log_unknown_command
+from config import BASE_DIR
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 active_model = {"name": None}
@@ -183,6 +184,13 @@ def interpret_basic(text):
 
     def toggle(base):
         return result(f"close_{base}" if closing and not opening else f"open_{base}")
+    
+    if has_any(text, ["เป็นวันอะไร", "วันอะไร", "วันที่เท่าไร"]):
+        query = text # ส่งข้อความทั้งหมดไปให้ฟังก์ชันสกัดเอาตัวเลขวันที่ออกมา
+        return result("check_specific_date", query)
+    if has_any(text, ["บันทึกข้อความ", "จดโน้ต", "เขียนโน้ต", "โน้ตไว้ว่า"]):
+        query = strip_phrases(text, ["บันทึกข้อความ", "จดโน้ต", "เขียนโน้ต", "โน้ตไว้ว่า", "ให้หน่อย", "หน่อย"])
+        return result("write_notepad", query)
     if has_any(text, ["วันนี้วันอะไร", "วันนั้้นวันอะไร", "วันที่เท่าไร", "วันอะไรแล้ว"]):
         return result("get_date")
     if has_any(text, ["ปิดเครื่อง", "ดับเครื่อง", "shutdown"]):
@@ -279,6 +287,59 @@ def cmd_get_date(_query):
     speak(f"วันนี้คือ{day_name} ที่ {now.day} เดือนนี้ ครับ",
           say=f"วันนี้คือ {day_name} ที่ {now.day} ครับ")
 
+def cmd_write_notepad(query):
+    if not query:
+        speak("ต้องการให้บันทึกข้อความว่าอะไรครับ")
+        answer = record_and_recognize("พูดข้อความที่ต้องการบันทึก...")
+        query = strip_phrases(strip_wake_words(answer), ["บันทึก", "จดจำ", "เขียนว่า"])
+
+    if query:
+        speak(f"กำลังบันทึกข้อความลงใน Notepad ครับ")
+        # เปิด Notepad
+        os.system("start notepad")
+        import time
+        time.sleep(0.8) # รอให้ Notepad เปิดขึ้นมาเตรียมรับพิมพ์
+        # พิมพ์ข้อความลงไปอัตโนมัติ
+        pyautogui.write(query, interval=0.05)
+    else:
+        speak("ไม่ได้ยินข้อความที่ต้องการบันทึกครับ")
+
+def cmd_save_to_file(query):
+    if not query:
+        speak("ต้องการให้บันทึกข้อความอะไรลงไฟล์ครับ")
+        answer = record_and_recognize("พูดข้อความที่ต้องการบันทึก...")
+        query = strip_phrases(strip_wake_words(answer), ["บันทึกใส่ไฟล์", "สร้างโน้ต"])
+
+    if query:
+        filename = os.path.join(BASE_DIR, "my_notes.txt")
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # เขียนข้อความต่อท้ายไฟล์ (Append) พร้อมใส่วันที่เวลา
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {query}\n")
+
+        speak("บันทึกข้อความลงไฟล์โน้ตให้เรียบร้อยแล้วครับ")
+    else:
+        speak("ไม่ได้ยินข้อความครับ")
+
+def cmd_check_specific_date(query):
+    numbers = re.findall(r'\d+', query)
+    if numbers:
+        target_day = int(numbers[0])
+        now = datetime.datetime.now()
+        try:
+            # สร้างออบเจ็กต์วันที่ของเดือนและปีปัจจุบันตามวันที่ระบุ
+            target_date = datetime.datetime(now.year, now.month, target_day)
+            days_th = ["วันจันทร์", "วันอังคาร", "วันพุธ", "วันพฤหัสบดี", "วันศุกร์", "วันเสาร์", "วันอาทิตย์"]
+            day_name = days_th[target_date.weekday()]
+            
+            speak(f"วันที่ {target_day} เป็น{day_name}ครับ",
+                  say=f"วันที่ {target_day} ตรงกับ {day_name} ครับ")
+        except ValueError:
+            speak("รายงาน วันที่ระบุไม่ถูกต้องในเดือนนี้ครับ")
+    else:
+        speak("รายงาน ไม่พบระบุวันที่ต้องการทราบครับ")
+
 COMMANDS = {
     "close_window": run_and_say("กำลังปิดหน้าต่างปัจจุบันให้ครับ", lambda: pyautogui.hotkey("alt", "f4")),
     "pause_music": run_and_say("สลับหยุดหรือเล่นต่อให้ครับ", lambda: pyautogui.press("playpause")),
@@ -301,6 +362,8 @@ COMMANDS = {
     "restart_pc": run_and_say("กำลังจะรีสตาร์ทเครื่องใน 10 วินาทีครับ", lambda: os.system("shutdown /r /t 10")),
     "sleep_pc": run_and_say("กำลังพักหน้าจอและระบบครับ", lambda: os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")),
     "get_date": cmd_get_date,
+    "write_notepad": cmd_write_notepad,
+    "check_specific_date": cmd_check_specific_date,
 }
 
 def handle_command(intent_data, raw_text=""):
@@ -319,7 +382,7 @@ def handle_command(intent_data, raw_text=""):
     else:
         # บันทึกข้อความดิบที่ผู้พูดลงใน Log เมื่อไม่เข้าใจคำสั่ง
         log_unknown_command(raw_text)
-        speak("ขออภัยครับ ยังไม่เข้าใจคำสั่งนี้ บันทึกข้อมูลไว้ให้แล้วครับ")
+        speak("รายงาน  ยังไม่เข้าใจคำสั่งนี้ บันทึกข้อมูลไว้ให้แล้วครับ")
         return False
     return False
 
