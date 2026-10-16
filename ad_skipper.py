@@ -10,25 +10,72 @@ import pygetwindow as gw
 
 from common import GUI_LOCK
 from config import (SKIP_DIR, SKIP_IMAGE, IMAGE_EXTS, MONITOR_INDEX, SCALES,
-                    REQUIRE_YOUTUBE_FOREGROUND, CROP_TO_WINDOW, DEBUG_AD_SKIPPER,
+                    AD_SCAN_MODE, AD_SCAN_INTERVAL_SEC, DEBUG_AD_SKIPPER,
                     MATCH_THRESHOLD, CLICK_COOLDOWN, CLICK_OFFSET_X, CLICK_OFFSET_Y)
+
+BROWSER_NAMES = ("chrome", "edge", "firefox", "brave", "opera")
+MIN_AREA_W, MIN_AREA_H = 100, 60          # พื้นที่ที่เล็กกว่านี้ใส่ปุ่มไม่ได้ ข้ามไป
 
 skipper_stop = threading.Event()
 skipper_thread = None
 
 
-def get_target_window():
-    """คืน (ทำงานต่อได้ไหม, หน้าต่างที่ active)
-    ถ้าไม่บังคับว่า YouTube ต้องอยู่หน้าสุด หรืออ่านหน้าต่างไม่ได้ จะสแกนทั้งจอ"""
-    if not REQUIRE_YOUTUBE_FOREGROUND:
-        return True, None
+def _is_youtube_window(w):
     try:
-        w = gw.getActiveWindow()
+        title = (w.title or "").lower()
+        return "youtube" in title and any(b in title for b in BROWSER_NAMES) and not w.isMinimized
     except Exception:
-        return True, None
-    if w and w.title and "youtube" in w.title.lower():
-        return True, w
-    return False, None
+        return False            # หน้าต่างเพิ่งถูกปิดระหว่างอ่านค่า
+
+
+_win_cache = {"t": 0.0, "wins": []}
+
+
+def _youtube_windows():
+    # getAllWindows ค่อนข้างหนัก จึงอ่านซ้ำไม่เกินทุก 0.5 วินาที
+    now = time.time()
+    if now - _win_cache["t"] > 0.5:
+        try:
+            _win_cache["wins"] = [w for w in gw.getAllWindows() if _is_youtube_window(w)]
+        except Exception:
+            _win_cache["wins"] = []
+        _win_cache["t"] = now
+    return _win_cache["wins"]
+
+
+def get_scan_areas(sct):
+    """คืน list ของพื้นที่ที่ต้องสแกน (left, top, right, bottom) เป็นพิกัดสัมบูรณ์บนจอ ตามโหมดใน config
+    ภาพที่จับมาคือภาพ "ที่ซ้อนทับแล้วจริงบนจอ" ถ้ามีหน้าต่างอื่นบังปุ่มอยู่ จะไม่เจอปุ่มและไม่คลิก"""
+    if AD_SCAN_MODE == "full_screen":
+        m = sct.monitors[MONITOR_INDEX]
+        return [(m["left"], m["top"], m["left"] + m["width"], m["top"] + m["height"])]
+
+    if AD_SCAN_MODE == "foreground":
+        try:
+            w = gw.getActiveWindow()
+        except Exception:
+            w = None
+        wins = [w] if w and _is_youtube_window(w) else []
+    else:                                                  # "youtube_windows"
+        wins = _youtube_windows()
+
+    v = sct.monitors[0]                                    # จอเสมือนที่รวมทุกจอ (รองรับหลายจอ)
+    vl, vt, vr, vb = v["left"], v["top"], v["left"] + v["width"], v["top"] + v["height"]
+    areas = []
+    for w in wins:
+        try:
+            l, t = max(w.left, vl), max(w.top, vt)
+            r, b = min(w.left + w.width, vr), min(w.top + w.height, vb)
+        except Exception:
+            continue
+        if r - l >= MIN_AREA_W and b - t >= MIN_AREA_H:
+            areas.append((l, t, r, b))
+    return areas
+
+
+def grab_gray(sct, l, t, r, b):
+    area = {"left": l, "top": t, "width": r - l, "height": b - t}
+    return cv2.cvtColor(np.array(sct.grab(area)), cv2.COLOR_BGRA2GRAY)
 
 
 def list_template_files():
@@ -58,20 +105,6 @@ def load_templates():
         if variants:
             loaded.append((name, variants))
     return loaded
-
-
-def capture_region(sct, monitor, win):
-    """จับภาพเฉพาะส่วนที่จำเป็น (หน้าต่าง YouTube ∩ จอที่เลือก) คืนภาพเทา + พิกัดมุมซ้ายบนบนจอ"""
-    left, top = monitor["left"], monitor["top"]
-    right, bottom = left + monitor["width"], top + monitor["height"]
-    if win is not None and CROP_TO_WINDOW:
-        l, t = max(win.left, left), max(win.top, top)
-        r, b = min(win.left + win.width, right), min(win.top + win.height, bottom)
-        if r - l >= 100 and b - t >= 100:          # หน้าต่างอยู่คนละจอ/เล็กผิดปกติ -> ใช้ทั้งจอแทน
-            left, top, right, bottom = l, t, r, b
-    area = {"left": left, "top": top, "width": right - left, "height": bottom - top}
-    gray = cv2.cvtColor(np.array(sct.grab(area)), cv2.COLOR_BGRA2GRAY)
-    return gray, left, top
 
 
 def match_templates(roi_gray, templates, hint=None):
@@ -111,17 +144,24 @@ def auto_skip_ads_loop():
     with mss.mss() as sct:
         while not skipper_stop.is_set():
             try:
-                ok, win = get_target_window()
-                if not ok:
-                    skipper_stop.wait(1)
+                areas = get_scan_areas(sct)
+                if not areas:
+                    skipper_stop.wait(1)                   # ไม่มีหน้าต่าง YouTube ให้ดู พักยาวหน่อย
                     continue
 
-                monitor = sct.monitors[MONITOR_INDEX]
-                roi, left, top = capture_region(sct, monitor, win)
-                best_val, best_loc, best_size, best_name, hint = match_templates(roi, templates, hint)
+                best = (0.0, None, (0, 0), "", None, 0, 0)
+                for (l, t, r, b) in areas:
+                    roi = grab_gray(sct, l, t, r, b)
+                    val, loc, size, name, h = match_templates(roi, templates, hint)
+                    if val > best[0]:
+                        best = (val, loc, size, name, h, l, t)
+                    if val >= MATCH_THRESHOLD:
+                        break
+                best_val, best_loc, best_size, best_name, new_hint, left, top = best
+                hint = new_hint or hint
                 now = time.time()
 
-                if DEBUG_AD_SKIPPER and 0.6 <= best_val < MATCH_THRESHOLD and now - last_debug_time > 2:
+                if DEBUG_AD_SKIPPER and MATCH_THRESHOLD - 0.1 <= best_val < MATCH_THRESHOLD and now - last_debug_time > 2:
                     print(f"🔍 AdSkipper: คะแนนสูงสุด {best_val:.2f} ({best_name}) ยังไม่ถึงเกณฑ์ {MATCH_THRESHOLD}")
                     last_debug_time = now
 
@@ -139,7 +179,7 @@ def auto_skip_ads_loop():
                         last_click_time = now
                         print("⏭️ RAPHAEL: กดข้ามโฆษณาแล้ว")
 
-                skipper_stop.wait(0.3)
+                skipper_stop.wait(AD_SCAN_INTERVAL_SEC)
             except Exception as e:
                 print(f"⚠️ AdSkipper Error: {e}")
                 skipper_stop.wait(2)

@@ -2,7 +2,6 @@ import datetime
 import os
 import re
 import time
-import webbrowser
 
 import pyautogui
 import pygetwindow as gw
@@ -15,6 +14,7 @@ except ImportError:
 
 import knowledge
 import llm
+import reminder
 from common import GUI_LOCK
 from config import BASE_DIR, WAKE_WORDS
 from knowledge import DAYS_TH, MONTHS_TH
@@ -57,10 +57,11 @@ def search_videos(query, n=10):
     opts = {"quiet": True, "skip_download": True, "extract_flat": True}
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"ytsearch{n}:{query}", download=False)
+    # ผลค้นหาอาจมีช่อง/เพลย์ลิสต์ปนมา (id ยาวกว่า 11 ตัว) ซึ่งเปิดเป็นวิดีโอไม่ได้ จึงกรองทิ้ง
     return [
         (e.get("title", "ไม่ทราบชื่อ"), f"https://www.youtube.com/watch?v={e['id']}")
-        for e in info.get("entries", [])
-        if e and e.get("id")
+        for e in (info.get("entries") or [])
+        if e and len(str(e.get("id", ""))) == 11
     ]
 
 BROWSER_NAMES = ("chrome", "edge", "firefox", "brave", "opera")
@@ -97,34 +98,23 @@ def focus_youtube_window():
             return True
     return False
 
-# def open_url(url):
-#     """เปิดลิงก์ด้วยเบราว์เซอร์เริ่มต้น ไม่ส่งคีย์บอร์ด/คลิกสุ่มไปยังหน้าต่างอื่น"""
-#     if not url.startswith(("https://www.youtube.com/watch?v=", "https://www.youtube.com/")):
-#         print("❌ URL YouTube ไม่ถูกต้อง")
-#         return False
-#     try:
-#         return webbrowser.open(url, new=2)
-#     except Exception as e:
-#         print(f"❌ เปิด YouTube ไม่สำเร็จ: {e}")
-#         return False
 def open_url(url):
+    print(f"🔗 {url}")
     with GUI_LOCK:
-        if focus_youtube_window():
+        if pyperclip is None:
+            print("⚠️ ยังไม่ได้ติดตั้ง pyperclip (pip install pyperclip) จึงเปิดเป็นแท็บใหม่แทน")
+        elif focus_youtube_window():
+            # ใช้วางแทนพิมพ์: ถ้าคีย์บอร์ดอยู่ภาษาไทย การพิมพ์ URL จะกลายเป็นตัวอักษรไทย
+            pyperclip.copy(url)
             pyautogui.hotkey("ctrl", "l")
             time.sleep(0.3)
-            # ล้างช่อง URL เก่าก่อนพิมพ์อันใหม่ เพื่อกันพิมพ์ทับตัวอักษรเดิม
-            pyautogui.hotkey("ctrl", "a")
-            pyautogui.press("backspace")
-            time.sleep(0.1)
-            pyautogui.write(url, interval=0.01)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.2)
             pyautogui.press("enter")
-        else:
-            os.system(f'start chrome "{url}"')
+            return
+        os.system(f'start chrome "{url}"')
 
 def play_index(i):
-    if not music["queue"] or i < 0 or i >= len(music["queue"]):
-        speak("ไม่มีเพลงในคิวครับ")
-        return
     title, url = music["queue"][i]
     music["index"] = i
     print(f"🎶 ชื่อเพลง: {title}")
@@ -167,8 +157,12 @@ def play_prev():
 #   2) knowledge: กฎตายตัว -> cache -> ไฟล์ -> Wikipedia
 #   3) LLM (Groq -> Gemini) เรียกรอบเดียวได้ทั้งคำสั่งและคำตอบ
 # =====================================================================
+def music_query(text):
+    """ตัดคำสั่งออก เหลือแต่ชื่อเพลง เช่น 'ช่วยเปิดเพลงเก่าๆ หน่อย' -> 'เก่าๆ'"""
+    q = strip_phrases(text, ["หาเพลง", "เปิดเพลง", "ขอเพลง", "ให้ฟังหน่อย", "ให้หน่อย", "หน่อย"])
+    return re.sub(r"^(ช่วย|ขอ)", "", q).strip()
+
 def interpret_basic(text):
-    text = strip_wake_words(text.lower().strip())
     opening, closing = has_open(text), has_close(text)
 
     def result(intent, query=""):
@@ -177,25 +171,17 @@ def interpret_basic(text):
     def toggle(base):
         return result(f"close_{base}" if closing and not opening else f"open_{base}")
 
-# --- เครื่องมือ Windows (เช็กปิดก่อนเปิด โดยระบุคำว่า "ปิด" นำหน้าให้ชัดเจน) ---
-    if has_any(text, ["ปิด explorer", "ปิด file explorer", "ปิดไฟล์เอกซ์พลอเรอร์", "ปิดโฟลเดอร์"]):
-        return result("close_explorer")
-    if has_any(text, ["ปิด control panel", "ปิดแผงควบคุม"]):
-        return result("close_control_panel")
-    if has_any(text, ["ปิด setting", "ปิดการตั้งค่า", "ปิดตั้งค่า"]):
-        return result("close_settings")
-
-    # --- เปิดเครื่องมือ Windows (ระบุเฉพาะคำสั่งเปิด หรือชื่อโปรแกรมเพียวๆ) ---
-    if has_any(text, ["เปิด explorer", "เปิด file explorer", "เปิดไฟล์เอกซ์พลอเรอร์", "เปิดโฟลเดอร์", "file explorer", "explorer"]):
-        return result("open_explorer")
-    if has_any(text, ["เปิด control panel", "เปิดแผงควบคุม", "control panel", "แผงควบคุม"]):
-        return result("open_control_panel")
-    if has_any(text, ["เปิด setting", "เปิดการตั้งค่า", "เปิดตั้งค่า", "settings", "setting"]):
-        return result("open_settings")
-    
     # --- ยกเลิกปิดเครื่อง ต้องมาก่อน เพราะมีคำว่า "ปิดเครื่อง" อยู่ข้างใน ---
     if has_any(text, ["ยกเลิกปิดเครื่อง", "ยกเลิกการปิดเครื่อง", "ยกเลิกรีสตาร์ท", "ยกเลิกการรีสตาร์ท"]):
         return result("cancel_shutdown")
+
+    # --- ระบบแจ้งเตือน (ต้องมาก่อนคำสั่งอื่น ไม่งั้น "เตือน 6 โมง ปิดเครื่อง" จะไปสั่งปิดเครื่องจริง) ---
+    if has_any(text, ["ยกเลิกเตือน", "ยกเลิกการเตือน", "ลบเตือน", "ลบการเตือน"]):
+        return result("cancel_reminders", text)
+    if has_any(text, ["มีเตือนอะไร", "เตือนอะไรบ้าง", "รายการเตือน", "ดูการเตือน", "ดูเตือน", "เตือนอะไรไว้"]):
+        return result("list_reminders")
+    if re.search(r"(?<!คำ)เตือน(?!ภัย)", text):
+        return result("set_reminder", text)
 
     # --- โน้ต ---
     if has_any(text, ["บันทึกลงไฟล์", "บันทึกใส่ไฟล์", "จดลงไฟล์", "สร้างโน้ต"]):
@@ -215,14 +201,12 @@ def interpret_basic(text):
         offset = 1 if "พรุ่งนี้" in text else -1 if "เมื่อวาน" in text else 2 if "มะรืน" in text else 0
         return result("get_date", str(offset))
 
-    # เครื่องคิดเลข: ต้องอยู่ก่อนคำสั่งปิดคอมพิวเตอร์
-    if has_any(text, ["เครื่องคิดเลข", "คิดเลข", "calculator", "calc"]):
-        return result("close_calc" if closing and not opening else "open_calc")
-    if "คำนวณ" in text:
-        return result("open_calc")
+    # --- เปิดเพลง (ขึ้นต้นประโยค) ต้องมาก่อนคำสั่งระบบ กันชื่อเพลงที่บังเอิญมีคำสั่งปนอยู่ ---
+    if re.match(r"^\s*(?:ช่วย)?(?:เปิด|หา|ขอ)เพลง(?!ต่อไป|ถัดไป|ก่อนหน้า|ที่แล้ว)", text):
+        return result("play_music", music_query(text))
 
     # --- ระบบ ---
-    if has_any(text, ["ปิดเครื่อง", "ดับเครื่อง", "สั่งปิดเครื่อง", "shutdown"]):
+    if has_any(text, ["ปิดเครื่อง", "ดับเครื่อง", "shutdown"]):
         return result("shutdown_pc")
     if has_any(text, ["รีสตาร์ท", "รีเครื่อง", "restart"]):
         return result("restart_pc")
@@ -247,8 +231,7 @@ def interpret_basic(text):
     if has_any(text, ["ปิดเสียง", "เปิดเสียง"]):
         return result("mute_audio")
     if has_any(text, ["หาเพลง", "เปิดเพลง", "ขอเพลง"]):
-        query = strip_phrases(text, ["หาเพลง", "เปิดเพลง", "ขอเพลง", "ให้ฟังหน่อย", "ให้หน่อย", "หน่อย"])
-        return result("play_music", query)
+        return result("play_music", music_query(text))
 
     # --- โปรแกรม ---
     if has_any(text, ["youtube", "you tube", "ยูทูป", "ยูทูบ", "ยูทิวบ์"]):
@@ -257,6 +240,8 @@ def interpret_basic(text):
         return toggle("notepad")
     if "chrome" in text or "เบราว์เซอร์" in text:
         return toggle("chrome")
+    if has_any(text, ["เครื่องคิดเลข", "คำนวณ"]):
+        return result("open_calc")
     if has_any(text, ["กี่โมง", "เวลาเท่าไร", "เวลาเท่าไหร่"]):
         return result("get_time")
     if has_any(text, ["ล็อกหน้าจอ", "ล็อกคอม"]):
@@ -315,30 +300,14 @@ def wait_for_window(keyword, timeout=3.0):
     return False
 
 def cmd_play_music(query):
-    # ป้องกันไม่ให้เมาส์/คีย์บอร์ดรวนระหว่างค้นหาเพลง
-    with GUI_LOCK:
-        if not query:
-            speak("ต้องการฟังเพลงอะไรครับ")
-            answer = record_and_recognize("พูดชื่อเพลงได้เลย (ไม่ต้องเรียกชื่อ)...")
-            query = strip_phrases(strip_wake_words(answer), ["เปิดเพลง", "หาเพลง", "ขอเพลง"])
-        
-        if query:
-            speak(f"กำลังค้นหาเพลง {query} ครับ")
-            try:
-                results = search_videos(query)
-            except Exception as e:
-                print(f"❌ ค้นหาไม่สำเร็จ: {e}")
-                speak("ค้นหาเพลงไม่สำเร็จครับ")
-                return
-            
-            if not results:
-                speak("ไม่พบเพลงที่ค้นหาครับ")
-                return
-            
-            music["queue"] = results
-            play_index(0)
-        else:
-            speak("ไม่ได้ยินชื่อเพลงครับ ลองใหม่อีกครั้งนะครับ")
+    if not query:
+        speak("ต้องการฟังเพลงอะไรครับ")
+        answer = record_and_recognize("พูดชื่อเพลงได้เลย (ไม่ต้องเรียกชื่อ)...")
+        query = music_query(strip_wake_words(answer))
+    if query:
+        play_new_query(query)
+    else:
+        speak("ไม่ได้ยินชื่อเพลงครับ ลองใหม่อีกครั้งนะครับ")
 
 def cmd_close_youtube(_query):
     with GUI_LOCK:
@@ -423,6 +392,54 @@ def cmd_restart(_query):
     else:
         speak("ยกเลิกการรีสตาร์ทแล้วครับ")
 
+def cmd_set_reminder(query):
+    found = reminder.parse_request(query)
+    if found is None and llm.llm_available():
+        print("🧠 อ่านเวลาไม่ออกด้วยกฎ ให้ LLM ช่วยแปลง...")
+        found = llm.parse_reminder(query)
+        if found and not found["message"]:
+            found["message"] = reminder.clean_message(query, [])
+    if found is None:
+        speak("ไม่พบเวลาที่ต้องการให้เตือนครับ ลองพูดว่า เตือน 18:00 ไปอาบน้ำ หรือ เตือนอีก 10 นาที ซื้อนม ครับ")
+        return
+
+    when = found["when"]
+    message = found["message"] or "ตามที่นัดหมาย"
+    if when <= datetime.datetime.now():
+        speak("เวลานั้นผ่านไปแล้วครับ ลองระบุเวลาใหม่นะครับ")
+        return
+    reminder.add_reminder(when, message)
+    # อ่านเวลากลับให้ฟังเสมอ เผื่อกรณีเวลากำกวม เช่น "6 โมง" ไม่บอกเช้าหรือเย็น
+    speak(f"ตั้งเตือน {reminder.spoken_time(when)} เรื่อง {message} เรียบร้อยแล้วครับ")
+
+def cmd_list_reminders(_query):
+    pending = reminder.list_pending()
+    if not pending:
+        speak("ตอนนี้ไม่มีรายการเตือนค้างอยู่ครับ")
+        return
+    speak(f"มีรายการเตือน {len(pending)} รายการครับ")
+    for r in pending[:5]:
+        when = datetime.datetime.strptime(r["time"], reminder.FMT)
+        speak(f"{reminder.spoken_time(when)} {r['message']}")
+    if len(pending) > 5:
+        speak(f"และอีก {len(pending) - 5} รายการครับ")
+
+def cmd_cancel_reminders(query):
+    pending = reminder.list_pending()
+    if not pending:
+        speak("ไม่มีรายการเตือนให้ยกเลิกครับ")
+        return
+    keyword = strip_phrases(query, ["ยกเลิกการเตือน", "ยกเลิกเตือน", "ลบการเตือน", "ลบเตือน",
+                                    "ทั้งหมด", "เรื่อง", "เกี่ยวกับ", "หน่อย", "ด้วย"]).strip()
+    if keyword:
+        removed = reminder.cancel(keyword)
+        speak(f"ยกเลิกรายการเตือนเกี่ยวกับ {keyword} จำนวน {removed} รายการแล้วครับ" if removed
+              else f"ไม่พบรายการเตือนเกี่ยวกับ {keyword} ครับ")
+    elif len(pending) == 1 or confirm(f"มีรายการเตือน {len(pending)} รายการ ยืนยันยกเลิกทั้งหมดไหมครับ"):
+        speak(f"ยกเลิกรายการเตือนทั้งหมด {reminder.cancel()} รายการแล้วครับ")
+    else:
+        speak("ไม่ยกเลิกครับ")
+
 COMMANDS = {
     "close_window": run_and_say("กำลังปิดหน้าต่างปัจจุบันให้ครับ", lambda: pyautogui.hotkey("alt", "f4")),
     "pause_music": run_and_say("สลับหยุดหรือเล่นต่อให้ครับ", lambda: pyautogui.press("playpause")),
@@ -432,14 +449,13 @@ COMMANDS = {
     "volume_down": run_and_say("ลดเสียงให้ครับ", lambda: pyautogui.press("volumedown", presses=5)),
     "mute_audio": run_and_say("สลับปิดหรือเปิดเสียงให้ครับ", lambda: pyautogui.press("volumemute")),
     "play_music": cmd_play_music,
-    "open_youtube": run_and_say("กำลังเปิด YouTube ให้ครับ", lambda: os.system('start chrome "https://www.youtube.com"')),
+    "open_youtube": run_and_say("กำลังเปิด YouTube ให้ครับ", lambda: os.system("start chrome https://www.youtube.com")),
     "close_youtube": cmd_close_youtube,
     "open_chrome": run_and_say("กำลังเปิด Google Chrome ให้ครับ", lambda: os.system("start chrome")),
     "close_chrome": run_and_say("กำลังปิด Google Chrome ครับ", lambda: os.system("taskkill /f /im chrome.exe >nul 2>&1")),
     "open_notepad": run_and_say("กำลังเปิด Notepad ให้ครับ", lambda: os.system("start notepad")),
     "close_notepad": run_and_say("กำลังปิด Notepad ครับ", lambda: os.system("taskkill /f /im notepad.exe >nul 2>&1")),
     "open_calc": run_and_say("กำลังเปิดเครื่องคิดเลขให้ครับ", lambda: os.system("start calc")),
-    "close_calc": run_and_say( "กำลังปิดเครื่องคิดเลขให้ค่ะ", lambda: os.system( "taskkill /f /im CalculatorApp.exe >nul 2>&1" ) ),
     "get_time": cmd_get_time,
     "get_date": cmd_get_date,
     "check_specific_date": cmd_check_specific_date,
@@ -448,62 +464,33 @@ COMMANDS = {
     "lock_screen": run_and_say("กำลังล็อกหน้าจอให้ครับ", lambda: os.system("rundll32.exe user32.dll,LockWorkStation")),
     "shutdown_pc": cmd_shutdown,
     "restart_pc": cmd_restart,
+    "set_reminder": cmd_set_reminder,
+    "list_reminders": cmd_list_reminders,
+    "cancel_reminders": cmd_cancel_reminders,
     "cancel_shutdown": run_and_say("ยกเลิกการปิดเครื่องให้แล้วครับ", lambda: os.system("shutdown /a >nul 2>&1")),
     "sleep_pc": run_and_say("กำลังพักหน้าจอและระบบครับ", lambda: os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")),
-    "open_explorer": run_and_say("กำลังเปิด File Explorer ให้ครับ", lambda: os.system("start explorer")),
-    "open_control_panel": run_and_say("กำลังเปิด Control Panel ให้ครับ", lambda: os.system("start control")),
-    "open_settings": run_and_say("กำลังเปิดการตั้งค่า Windows ให้ครับ", lambda: os.system("start ms-settings:")),
-    "close_explorer": run_and_say("กำลังปิด File Explorer ครับ", lambda: os.system("taskkill /f /im explorer.exe & start explorer.exe >nul 2>&1")),
-    "close_control_panel": run_and_say("กำลังปิด Control Panel ครับ", lambda: os.system("taskkill /f /im control.exe >nul 2>&1")),
-    "close_settings": run_and_say("กำลังปิดการตั้งค่าครับ", lambda: os.system("taskkill /f /im SystemSettings.exe >nul 2>&1")),
 }
 
-
 def handle_command(intent_data, raw_text=""):
-
     if not isinstance(intent_data, dict):
         intent_data = UNKNOWN
-
-    # ต้องประกาศตัวแปรก่อนนำไปใช้งาน
-    intent = intent_data.get("intent", "unknown")
+    intent = intent_data.get("intent")
     query = (intent_data.get("query") or "").strip()
+    if intent in ("set_reminder", "cancel_reminders") and not query:
+        query = raw_text
 
-    # ตรวจสอบคำสั่งอันตราย
-    dangerous_intents = {
-        "shutdown_pc": ["ปิดเครื่อง", "ดับเครื่อง", "shutdown"],
-        "restart_pc": ["รีสตาร์ท", "รีเครื่อง", "restart"],
-        "sleep_pc": ["พักเครื่อง", "สลีป", "sleep pc"]
-    }
-
-    if intent in dangerous_intents:
-
-        original = strip_wake_words(raw_text.lower().strip())
-
-        if interpret_basic(original).get("intent") != intent:
-            print(f"⚠️ ปฏิเสธคำสั่งอันตราย: {intent}")
-            print(f"ข้อความต้นฉบับ: {raw_text}")
-
-            speak("คำสั่งไม่ตรงกับสิ่งที่ได้ยิน กรุณาลองใหม่ค่ะ")
-            return False
-
-    # ปิดระบบผู้ช่วย
     if intent == "exit_system":
-        speak("ปิดการทำงานผู้ช่วยแล้วค่ะ")
+        speak("ปิดการทำงานผู้ช่วยแล้วครับ สวัสดีครับ")
         return True
 
-    # ตอบคำถามทั่วไป
     if intent == "answer":
-        speak(intent_data.get("answer") or "ขออภัยค่ะ ยังไม่มีคำตอบ")
+        speak(intent_data.get("answer") or "ขออภัยครับ ผมยังไม่มีคำตอบ")
         return False
 
-    # เรียกใช้งานคำสั่ง
     handler = COMMANDS.get(intent)
-
     if handler:
         handler(query)
-
     else:
         log_unknown_command(raw_text)
-        speak("รายงาน ยังไม่เข้าใจคำสั่งนี้ค่ะ บันทึกไว้ให้แล้วค่ะ")
-
+        speak("ยังไม่เข้าใจคำสั่งนี้ครับ บันทึกไว้ให้แล้วครับ")
     return False

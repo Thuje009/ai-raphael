@@ -69,8 +69,12 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")
 
 MONITOR_INDEX = 1
 SCALES = np.linspace(0.7, 1.5, 7)
-REQUIRE_YOUTUBE_FOREGROUND = True
-CROP_TO_WINDOW = True                # ค้นหาเฉพาะในหน้าต่าง YouTube (เร็วกว่าสแกนทั้งจอมาก)
+# โหมดสแกนปุ่มข้ามโฆษณา
+#   "foreground"      = สแกนเฉพาะตอนหน้าต่าง YouTube อยู่ด้านหน้า (ปลอดภัยสุด)
+#   "youtube_windows" = สแกนทุกหน้าต่าง YouTube ที่มองเห็นอยู่ แม้ไม่ได้อยู่ด้านหน้า (แนะนำ)
+#   "full_screen"     = สแกนทั้งจอ MONITOR_INDEX ตลอดเวลา (กินเครื่องและเสี่ยงคลิกผิดมากสุด)
+AD_SCAN_MODE = "youtube_windows"
+AD_SCAN_INTERVAL_SEC = 0.3           # สแกนทุกกี่วินาที (เครื่องหน่วงให้เพิ่มเป็น 0.5-1.0)
 DEBUG_AD_SKIPPER = True
 MATCH_THRESHOLD = 0.82
 CLICK_COOLDOWN = 3.0
@@ -78,3 +82,13 @@ CLICK_COOLDOWN = 3.0
 # ตั้งเป็น 0 ก่อน (คลิกกลางปุ่มพอดี) ถ้ายังคลิกเพี้ยนค่อยปรับ
 CLICK_OFFSET_X = 0
 CLICK_OFFSET_Y = 0
+
+# =====================================================================
+# Reminder (ระบบแจ้งเตือน)
+# =====================================================================
+REMINDER_CHECK_SEC = 5               # เช็กรายการที่ถึงเวลาทุกกี่วินาที
+REMINDER_MAX_REPEAT = 5              # เตือนซ้ำสูงสุดกี่รอบถ้าไม่มีคำตอบ (แล้วบันทึกว่าพลาด)
+REMINDER_REPEAT_GAP_SEC = 10         # เว้นกี่วินาทีก่อนเตือนซ้ำ
+REMINDER_SNOOZE_MIN = 10             # พูดว่า "เลื่อน" เฉยๆ จะเลื่อนไปกี่นาที
+REMINDER_LATE_MIN = 5                # เลยเวลามากกว่านี้ (เช่นเปิดโปรแกรมช้า) จะบอกว่า "เลยเวลามาแล้ว"
+REMINDER_KEEP_DAYS = 2               # เก็บรายการที่เตือนแล้วไว้กี่วัน

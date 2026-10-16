@@ -20,6 +20,7 @@ INTENTS = [
     "open_chrome", "close_chrome", "open_calc",
     "get_time", "get_date", "check_specific_date",
     "write_notepad", "save_note",
+    "set_reminder", "list_reminders", "cancel_reminders",
     "lock_screen", "close_window",
     "shutdown_pc", "restart_pc", "sleep_pc", "cancel_shutdown",
     "exit_system", "unknown",
@@ -28,7 +29,7 @@ VALID = set(INTENTS) | {"answer"}
 
 UNKNOWN = {"intent": "unknown", "query": "", "answer": "", "cacheable": False}
 
-SYSTEM_PROMPT = """คุณคือ "ราฟาเอล" ผู้ช่วยเสียงภาษาไทยบน Windows พูดสุภาพ ลงท้ายด้วย "ครับ"
+SYSTEM_PROMPT = """คุณคือ "ราฟาเอล" ผู้ช่วยเสียงภาษาไทยบน Windows พูดสุภาพ ลงท้ายด้วย "ค่ะ"
 ตอนนี้คือ {now}
 วิเคราะห์ข้อความของผู้ใช้ แล้วตอบเป็น JSON เท่านั้น รูปแบบ:
 {{"intent": "...", "query": "...", "answer": "...", "cacheable": true}}
@@ -36,6 +37,7 @@ SYSTEM_PROMPT = """คุณคือ "ราฟาเอล" ผู้ช่ว
 กติกา:
 1. ถ้าเป็นคำสั่งควบคุมคอมพิวเตอร์ ให้ intent เป็นชื่อคำสั่งจากรายการด้านล่าง
    query = ชื่อเพลงหรือข้อความที่ต้องใช้ (ถ้าไม่มีให้เว้นว่าง) และ answer ว่างไว้
+   ถ้า intent เป็น set_reminder หรือ cancel_reminders ให้ query = ข้อความเดิมของผู้ใช้ทั้งประโยค
 2. ถ้าเป็นคำถามหรือชวนคุย ให้ intent = "answer" และ answer = คำตอบภาษาไทย
    สั้นไม่เกิน 2 ประโยค ห้ามมี markdown อีโมจิ หรือลิงก์ เพราะจะถูกอ่านออกเสียง
 3. cacheable = true เฉพาะคำตอบที่ไม่เปลี่ยนตามเวลา (ประวัติศาสตร์ ความรู้ทั่วไป)
@@ -148,7 +150,8 @@ def _cooldown_seconds(msg, retry_after=None):
     return 15, "ขัดข้องชั่วคราว"
 
 
-def _parse(raw):
+def _loads(raw):
+    """แปลงข้อความจาก LLM เป็น dict (รองรับกรณีมี ```json ครอบ หรือมีข้อความปนมา) ไม่ได้คืน None"""
     raw = (raw or "").strip()
     raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
     try:
@@ -161,7 +164,12 @@ def _parse(raw):
             data = json.loads(m.group(0))
         except ValueError:
             return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _parse(raw):
+    data = _loads(raw)
+    if data is None:
         return None
 
     intent = str(data.get("intent") or "").strip()
@@ -175,24 +183,15 @@ def _parse(raw):
             "cacheable": bool(data.get("cacheable", False))}
 
 
-def ask(text):
-    """ส่งข้อความเข้า LLM รอบเดียว คืน dict (เป็น UNKNOWN ถ้าทุกตัวล้มเหลว)"""
-    chain = _providers()
-    if not chain:
-        return dict(UNKNOWN)
-
-    system = SYSTEM_PROMPT.format(
-        now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        intents=", ".join(INTENTS),
-    )
-
-    for provider, models, call in chain:
+def _run_chain(system, text, parser):
+    """ไล่ลอง provider/โมเดลตามลำดับ คืนผลที่ parser แปลงได้ หรือ None ถ้าล้มเหลวทั้งหมด"""
+    for provider, models, call in _providers():
         for model in models:
             if _cooldown.get((provider, model), 0) > time.time():
                 continue
             try:
                 started = time.time()
-                data = _parse(call(model, system, text))
+                data = parser(call(model, system, text))
                 if data is None:
                     print(f"⚠️ {provider}:{model} ตอบรูปแบบไม่ถูกต้อง ลองตัวถัดไป")
                     _cooldown[(provider, model)] = time.time() + 15
@@ -204,7 +203,41 @@ def ask(text):
                 secs, why = _cooldown_seconds(str(e), retry_after)
                 _cooldown[(provider, model)] = time.time() + secs
                 print(f"⚠️ {provider}:{model} {why} (พัก {int(secs)} วินาที): {str(e)[:100]}")
-    return dict(UNKNOWN)
+    return None
+
+
+def ask(text):
+    """ส่งข้อความเข้า LLM รอบเดียว คืน dict (เป็น UNKNOWN ถ้าทุกตัวล้มเหลว)"""
+    if not _providers():
+        return dict(UNKNOWN)
+    system = SYSTEM_PROMPT.format(
+        now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        intents=", ".join(INTENTS),
+    )
+    return _run_chain(system, text, _parse) or dict(UNKNOWN)
+
+
+REMINDER_PROMPT = """แปลงประโยคตั้งเตือนภาษาไทยเป็น JSON เท่านั้น รูปแบบ:
+{{"when": "YYYY-MM-DD HH:MM", "message": "..."}}
+ตอนนี้คือ {now}
+- when = วันเวลาที่ต้องเตือน (24 ชั่วโมง) ถ้าไม่ระบุวันและเวลานั้นผ่านไปแล้ววันนี้ ให้เป็นพรุ่งนี้
+- message = สิ่งที่ต้องเตือน ไม่มีคำว่า "เตือน" และไม่มีเวลา
+- ถ้าไม่มีเวลาที่ชัดเจน ให้ when เป็นสตริงว่าง"""
+
+
+def parse_reminder(text):
+    """ใช้ LLM แปลงประโยคตั้งเตือนที่ regex อ่านไม่ออก คืน {"when": datetime, "message": str} หรือ None"""
+    if not _providers():
+        return None
+    system = REMINDER_PROMPT.format(now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M (%A)"))
+    data = _run_chain(system, text, _loads)
+    if not data:
+        return None
+    try:
+        when = datetime.datetime.strptime(str(data.get("when") or "").strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+    return {"when": when, "message": str(data.get("message") or "").strip()}
 
 
 # ---------------------------------------------------------------------

@@ -8,3 +8,6 @@ tts_cache/
 knowledge_cache.json
 unknown_commands.json
 my_notes.txt
+reminders.json
+reminders.json.bad
+reminders.json.tmp
