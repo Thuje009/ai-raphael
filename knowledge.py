@@ -12,7 +12,7 @@ from urllib.parse import quote
 import requests
 
 from config import (KNOWLEDGE_DIR, KNOWLEDGE_CACHE_FILE, KNOWLEDGE_CACHE_MAX,
-                    FILE_MATCH_THRESHOLD, WIKI_LANG, WIKI_TIMEOUT_SEC)
+                    FILE_MATCH_THRESHOLD, WIKI_LANG, WIKI_TIMEOUT_SEC, RAG_TOP_K, RAG_MIN_SCORE)
 
 DAYS_TH = ["วันจันทร์", "วันอังคาร", "วันพุธ", "วันพฤหัสบดี", "วันศุกร์", "วันเสาร์", "วันอาทิตย์"]
 MONTHS_TH = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
@@ -62,6 +62,24 @@ def shorten(text, limit=350):
 
 
 # ---------------------------------------------------------------------
+# คำถามที่ต้องใช้ "ข้อมูลสด" (ตำแหน่งปัจจุบัน ราคา ข่าว ผลแข่ง ฯลฯ)
+# LLM ตอบเรื่องพวกนี้จากความจำแล้วมั่วชื่อ/ตัวเลขได้ จึงตอบตามจริงว่าไม่มีข้อมูลสด แทนการเดา
+# (เมื่อมีระบบค้นข้อมูลสดในอนาคต ให้ข้ามตัวตรวจนี้)
+# ---------------------------------------------------------------------
+LIVE_CUES = r"(ปัจจุบัน|ตอนนี้|ขณะนี้|ล่าสุด|ใหม่ล่าสุด|วันนี้)"
+LIVE_TOPICS = (r"(นายก|รัฐมนตรี|ประธานาธิบดี|ผู้ว่า|ซีอีโอ|ceo|ราคา|ข่าว|ผลบอล|ผลการแข่งขัน|ผลแข่ง|"
+               r"หุ้น|ค่าเงิน|อัตราแลกเปลี่ยน|อากาศ|ฝนตก|ดัชนี)")
+LIVE_DATA_REPLY = ("รายงานค่ะ ข้อมูลนี้เปลี่ยนแปลงตามเวลา ดิฉันยังไม่มีข้อมูลสดจึงไม่ขอเดา "
+                   "รบกวนท่านตรวจสอบจากแหล่งข่าวโดยตรงนะคะ")
+
+
+def needs_live_data(q):
+    t = (q or "").lower()
+    return bool((re.search(LIVE_CUES, t) and re.search(LIVE_TOPICS, t))
+                or re.search(r"(ราคาทอง|ราคาน้ำมัน|ข่าววันนี้|ผลบอลเมื่อคืน)", t))
+
+
+# ---------------------------------------------------------------------
 # 1) กฎตายตัว (ไม่ต้องใช้เน็ต/AI)
 # ---------------------------------------------------------------------
 def rule_answer(q):
@@ -69,10 +87,10 @@ def rule_answer(q):
     now = datetime.datetime.now()
 
     if re.search(r"(เป็นใคร|แนะนำตัว|(คุณ|เธอ|ตัวเอง)ชื่อ)", n):
-        return "ผมชื่อราฟาเอล เป็นผู้ช่วยเสียงบนคอมพิวเตอร์ของคุณครับ"
+        return "ดิฉันชื่อราฟาเอล ผู้ช่วยปัญญาประดิษฐ์สายวิเคราะห์ประจำตัวท่านค่ะ"
     if re.search(r"(ทำอะไรได้บ้าง|ช่วยอะไรได้บ้าง)", n):
-        return ("ผมเปิดเพลง ควบคุมเสียง เปิดปิดโปรแกรม บอกเวลาและวันที่ จดโน้ต "
-                "ข้ามโฆษณา YouTube และตอบคำถามทั่วไปได้ครับ")
+        return ("รายงาน ดิฉันเปิดเพลง ควบคุมเสียง เปิดปิดโปรแกรม บอกเวลาและวันที่ จดโน้ต "
+                "ตั้งเตือน ข้ามโฆษณา YouTube และวิเคราะห์ตอบคำถามทั่วไปได้ค่ะ")
     if len(n) <= 12 and "สวัสดี" in n:
         return "สวัสดีครับ มีอะไรให้ช่วยไหมครับ"
     if len(n) <= 12 and "ขอบคุณ" in n:
@@ -156,6 +174,32 @@ def _load_chunks(sig):
                 if len(part) >= 20:
                     chunks.append((part, _grams(part)))
     return chunks
+
+
+def retrieve(q, k=None, min_score=None):
+    """ดึงย่อหน้าจากไฟล์ใน knowledge/ ที่ใกล้เคียงกับคำถามที่สุด คืน [(ข้อความ, คะแนน 0-1)] เรียงจากมากไปน้อย
+    ใช้เป็น "ข้อมูลอ้างอิง" ให้ LLM เรียบเรียงเป็นคำตอบ (RAG) แทนการอ่านย่อหน้าดิบออกเสียง"""
+    k = RAG_TOP_K if k is None else k
+    min_score = RAG_MIN_SCORE if min_score is None else min_score
+    if not os.path.isdir(KNOWLEDGE_DIR):
+        return []
+    sig = _file_signature()
+    if sig != _index["sig"]:
+        _index["sig"], _index["chunks"] = sig, _load_chunks(sig)
+    if not _index["chunks"]:
+        return []
+
+    topic = extract_topic(q)
+    if len(topic.replace(" ", "")) < 3:
+        return []
+    q_grams = _grams(topic)
+    if not q_grams:
+        return []
+
+    scored = [(len(q_grams & grams) / len(q_grams), text) for text, grams in _index["chunks"]]
+    scored = [(text, score) for score, text in sorted(scored, key=lambda x: x[0], reverse=True)[:k]
+              if score >= min_score]
+    return scored
 
 
 def file_answer(q):

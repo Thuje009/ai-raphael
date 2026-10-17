@@ -21,7 +21,8 @@ try:
 except ImportError:
     edge_tts = None
 
-from config import (BASE_DIR, WAKE_DISPLAY, DEBUG_MIC, TTS_ENGINE, TTS_VOICE, TTS_CACHE_DIR,
+from persona import femme
+from config import (PERSONA_FEMALE, BASE_DIR, WAKE_DISPLAY, DEBUG_MIC, TTS_ENGINE, TTS_VOICE, TTS_CACHE_DIR,
                     TTS_CACHE_MAX_CHARS, TTS_RATE, TTS_PITCH, MIC_SAMPLE_RATE, VAD_MIN_RMS, VAD_NOISE_RATIO,
                     VAD_SILENCE_SEC, VAD_MAX_WAIT_SEC, VAD_MAX_SEC)
 
@@ -77,6 +78,9 @@ def _get_audio(text):
 
 
 def speak(message, say=None):
+    if PERSONA_FEMALE:                       # ตาข่ายนิรภัย: ทุกประโยคที่พูดจะลงท้ายด้วย ค่ะ/คะ
+        message = femme(message)
+        say = femme(say) if say is not None else None
     print(message)
     text_to_say = say if say is not None else message
     clean = re.sub(r"[^\w\s\u0E00-\u0E7F.,:'\"-]", "", text_to_say).strip()

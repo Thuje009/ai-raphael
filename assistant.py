@@ -12,11 +12,12 @@ try:
 except ImportError:
     pyperclip = None
 
+import conversation
 import knowledge
 import llm
 import reminder
 from common import GUI_LOCK
-from config import BASE_DIR, WAKE_WORDS
+from config import BASE_DIR, WAKE_WORDS, FILE_MATCH_THRESHOLD
 from knowledge import DAYS_TH, MONTHS_TH
 from logger import log_unknown_command
 from speech import speak, record_and_recognize
@@ -248,22 +249,62 @@ def interpret_basic(text):
         return result("lock_screen")
     return dict(UNKNOWN)
 
+def _answered(text, reply):
+    conversation.add(text, reply)               # จำไว้ให้ถามต่อเนื่องได้
+    return {"intent": "answer", "query": "", "answer": reply}
+
 def interpret(text):
+    """ลำดับ: คำสั่งพื้นฐาน -> กฎตายตัว -> (ถ้าไม่ใช่คำถามต่อเนื่อง) cache / ไฟล์ / Wikipedia -> LLM
+    ไฟล์และ Wikipedia ไม่ได้ถูกอ่านออกเสียงตรงๆ แต่ส่งให้ LLM เรียบเรียงเป็นคำตอบตามบุคลิก (RAG)"""
     basic = interpret_basic(text)
     if basic["intent"] != "unknown":
         return basic
 
-    reply = knowledge.local_answer(text)
+    reply = knowledge.rule_answer(text)
     if reply:
-        return {"intent": "answer", "query": "", "answer": reply}
+        return _answered(text, reply)
+
+    history = conversation.recent()
+    followup = conversation.is_followup(text)
+    context, source, raw_fallback = None, None, None
+
+    # คำถามต่อเนื่อง (เช่น "แล้วเขาเกิดที่ไหน") ห้ามค้นด้วยข้อความดิบ จะได้คำตอบผิดเรื่อง ปล่อยให้ LLM ใช้ประวัติตอบ
+    if not followup:
+        cached = knowledge.cache_answer(text)
+        if cached:
+            print("💾 ตอบจาก cache")
+            return _answered(text, cached)
+
+        chunks = knowledge.retrieve(text)
+        if chunks:
+            print(f"📚 พบข้อมูลในโฟลเดอร์ knowledge {len(chunks)} ย่อหน้า (คะแนนสูงสุด {chunks[0][1]:.2f})")
+            context, source = [c for c, _s in chunks], "file"
+            if chunks[0][1] >= FILE_MATCH_THRESHOLD:
+                raw_fallback = knowledge.shorten(chunks[0][0])
+        elif knowledge.looks_factual(text) and not knowledge.needs_live_data(text):
+            print("🔎 กำลังค้นหาจาก Wikipedia...")
+            wiki = knowledge.wiki_answer(text)
+            if wiki:
+                context, source, raw_fallback = [wiki], "wiki", wiki
+
+    # เรื่องที่ต้องใช้ข้อมูลสด (ตำแหน่งปัจจุบัน ราคา ข่าว) ห้ามให้ LLM ตอบจากความจำ เพราะจะมั่วชื่อ/ตัวเลข
+    if source != "file" and knowledge.needs_live_data(text):
+        print("🛑 คำถามต้องใช้ข้อมูลสด ตอบตามจริงว่าไม่มีข้อมูล แทนการให้ LLM เดา")
+        return _answered(text, knowledge.LIVE_DATA_REPLY)
 
     if not llm.llm_available():
-        print("ℹ️ ยังไม่ได้ตั้ง GROQ_API_KEY / GEMINI_API_KEY จึงตอบได้เฉพาะคำสั่งพื้นฐาน")
-        return dict(UNKNOWN)
+        print("ℹ️ ยังไม่ได้ตั้ง GROQ_API_KEY / GEMINI_API_KEY จึงตอบได้เฉพาะคำสั่งพื้นฐานและข้อมูลดิบ")
+        return _answered(text, raw_fallback) if raw_fallback else dict(UNKNOWN)
 
-    data = llm.ask(text)
-    if data["intent"] == "answer" and data.get("cacheable"):
-        knowledge.remember(text, data["answer"])    # ครั้งหน้าไม่ต้องเรียก LLM อีก
+    data = llm.ask(text, history=history, context=context)
+    if data["intent"] == "answer":
+        if source == "file" or followup:
+            data["cacheable"] = False           # ไฟล์แก้ได้ / คำตอบพึ่งบริบท ห้ามเก็บลง cache
+        if data.get("cacheable"):
+            knowledge.remember(text, data["answer"])
+        conversation.add(text, data["answer"])
+    elif data["intent"] == "unknown" and raw_fallback:
+        return _answered(text, raw_fallback)    # LLM ล้มเหลวทั้งหมด แต่มีข้อมูลดิบ ใช้แทนไปก่อน
     return data
 
 # =====================================================================
@@ -484,7 +525,7 @@ def handle_command(intent_data, raw_text=""):
         return True
 
     if intent == "answer":
-        speak(intent_data.get("answer") or "ขออภัยครับ ผมยังไม่มีคำตอบ")
+        speak(intent_data.get("answer") or "ขออภัยค่ะ ดิฉันยังไม่มีคำตอบ")
         return False
 
     handler = COMMANDS.get(intent)
@@ -492,5 +533,8 @@ def handle_command(intent_data, raw_text=""):
         handler(query)
     else:
         log_unknown_command(raw_text)
-        speak("ยังไม่เข้าใจคำสั่งนี้ครับ บันทึกไว้ให้แล้วครับ")
+        if re.search(r"(อะไร|ใคร|ที่ไหน|เมื่อไร|เมื่อไหร่|ทำไม|อย่างไร|ยังไง|ไหม|หรือเปล่า|เท่าไร|เท่าไหร่|กี่)", raw_text):
+            speak("รายงานครับ ดิฉันจับใจความคำถามนี้ไม่ได้ ลองถามใหม่อีกครั้งได้ไหมครับ")   # เป็นคำถาม ไม่ใช่คำสั่ง
+        else:
+            speak("ยังไม่เข้าใจคำสั่งนี้ครับ บันทึกไว้ให้แล้วครับ")
     return False

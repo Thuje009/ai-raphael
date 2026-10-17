@@ -35,7 +35,10 @@ def _load():
         return []
     try:
         with open(REMINDER_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            raw = f.read()
+        if not raw.strip():
+            return []                              # ไฟล์ว่างเปล่า (เช่นเพิ่งสร้าง) ไม่ใช่ไฟล์เสีย
+        data = json.loads(raw)
         if not isinstance(data, list):
             raise ValueError("รูปแบบไฟล์ไม่ใช่ list")
     except Exception as e:
@@ -172,7 +175,7 @@ def parse_when(text, now=None):
 
     # --- 3) เวลา ---
     hours, minute, colon_format = None, 0, False
-    m = re.search(r"(\d{1,2})[:.](\d{2})(?:\s*น\.|\s*นาฬิกา)?", text)
+    m = re.search(r"(\d{1,2})[:.](\d{2})(?:\s*น\.|\s*น(?=\s|$)|\s*นาฬิกา)?", text)
     if m:
         h, minute = int(m.group(1)), int(m.group(2))
         if h > 24 or minute > 59:
