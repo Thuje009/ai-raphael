@@ -3,3 +3,12 @@ __pycache__/
 temp_audio.wav
 reply.mp3
 player_region.json
+.env
+tts_cache/
+knowledge_cache.json
+unknown_commands.json
+my_notes.txt
+reminders.json
+reminders.json.bad
+reminders.json.tmp
+live_search_usage.json
