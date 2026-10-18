@@ -5,30 +5,38 @@
 """
 import datetime
 import json
+import os
 import re
 import time
-from datetime import datetime, timezone
 
 import requests
 
-from persona import PERSONA_PROMPT
+from persona import PERSONA_PROMPT, PERSONA_SEARCHABLE
 from config import (GROQ_API_KEY, GROQ_MODELS, GEMINI_API_KEY, GEMINI_MODELS,
-                    LLM_PROVIDERS, LLM_TIMEOUT_SEC, LLM_MAX_TOKENS)
+                    LLM_PROVIDERS, LLM_TIMEOUT_SEC, LLM_MAX_TOKENS,
+                    GROQ_SMART_MODELS, GEMINI_SMART_MODELS, GROQ_REASONING_FAST, GROQ_REASONING_SMART,
+                    LLM_MAX_TOKENS_SMART, LLM_TIMEOUT_SMART_SEC, SMART_MIN_CHARS,
+                    LIVE_SEARCH_ENABLED, GEMINI_SEARCH_MODELS, LIVE_SEARCH_TIMEOUT_SEC,
+                    LIVE_SEARCH_DAILY_LIMIT, LIVE_ANSWER_MAX_CHARS, LIVE_SEARCH_USAGE_FILE)
 
 INTENTS = [
     "play_music", "next_music", "prev_music", "pause_music",
     "volume_up", "volume_down", "mute_audio",
+    "open_app", "close_app",
     "open_youtube", "close_youtube", "open_notepad", "close_notepad",
     "open_chrome", "close_chrome", "open_calc",
+    "open_explorer", "close_explorer",             
+    "open_settings", "close_settings",             
+    "open_control_panel", "close_control_panel",   
     "get_time", "get_date", "check_specific_date",
     "write_notepad", "save_note",
     "set_reminder", "list_reminders", "cancel_reminders",
     "lock_screen", "close_window",
     "shutdown_pc", "restart_pc", "sleep_pc", "cancel_shutdown",
-    "exit_system", "unknown",
+    "live_search", "exit_system", "unknown",
+    "close_other_windows",
 ]
-VALID_INTENTS = set(INTENTS) | {"answer", "unknown"}
-VALID = VALID_INTENTS
+VALID = set(INTENTS) | {"answer"}
 
 UNKNOWN = {"intent": "unknown", "query": "", "answer": "", "cacheable": False}
 
@@ -40,7 +48,11 @@ SYSTEM_PROMPT = """{persona}
 
 กติกา:
 1. ถ้าเป็นคำสั่งควบคุมคอมพิวเตอร์ ให้ intent เป็นชื่อคำสั่งจากรายการด้านล่าง
-   query = ชื่อเพลงหรือข้อความที่ต้องใช้ (ถ้าไม่มีให้เว้นว่าง) และ answer ว่างไว้
+   query = ชื่อเป้าหมายหรือข้อความที่ต้องใช้ (ถ้าไม่มีให้เว้นว่าง) และ answer ว่างไว้
+   สำหรับ open_app / close_app ให้ query เป็นชื่อโปรแกรมเท่านั้น ห้ามสร้าง path, shell command หรือพารามิเตอร์รันโปรแกรม
+   ชื่อโปรแกรมที่ไม่อยู่ในรายการที่สแกน ให้ตอบว่าไม่พบโปรแกรม อย่าเดาชื่อหรือเปลี่ยนเป็นโปรแกรมอื่น
+   YouTube เป็นเว็บไซต์ ให้ใช้ open_youtube / close_youtube ไม่ใช่ open_app / close_app
+   หากเป็นคำสั่งควบคุมคอมพิวเตอร์ ให้ cacheable = false
    ถ้า intent เป็น set_reminder หรือ cancel_reminders ให้ query = ข้อความเดิมของผู้ใช้ทั้งประโยค
 2. ถ้าเป็นคำถามหรือชวนคุย ให้ intent = "answer" และ answer = คำตอบภาษาไทยตามบุคลิกข้างต้น
    กระชับ ไม่เกิน 3 ประโยค ห้ามมี markdown อีโมจิ หรือลิงก์ เพราะจะถูกอ่านออกเสียง
@@ -48,6 +60,12 @@ SYSTEM_PROMPT = """{persona}
    ข้อมูลที่เปลี่ยนได้ (ข่าว ราคา อากาศ ผลกีฬา ตำแหน่งปัจจุบัน) หรือคำตอบที่ใช้ประวัติการคุย ให้ false
 4. ถ้าเป็นคำถามแต่ไม่แน่ใจคำตอบ ให้ intent = "answer" แล้วตอบตรงๆ ใน answer ว่ายืนยันไม่ได้ ห้ามเดา
    ใช้ intent = "unknown" เฉพาะเมื่อข้อความไม่ใช่คำสั่งและฟังไม่เป็นประโยค (เสียงรบกวน คำที่ขาดหาย) และเว้น answer ว่าง
+5. หากผู้ใช้สั่งงานหลายคำสั่งพร้อมกันในประโยคเดียว (และระบบยังรองรับทีละคำสั่ง) ให้กำหนด intent = "answer" 
+   และตอบใน answer ตามบุคลิกเพื่อแจ้งผู้ใช้ เช่น "รายงานค่ะ ท่านสั่งงานหลายรายการพร้อมกัน ดิฉันยังรองรับได้ทีละคำสั่ง รบกวนสั่งทีละรายการนะคะ"
+
+{live_rule}
+
+{app_catalog}
 
 รายการ intent: {intents}{context}"""
 
@@ -71,7 +89,7 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 def _history_json(answer):
     """เก็บคำตอบเก่าในรูป JSON เดียวกับที่ต้องการ โมเดลจะได้ตอบเป็น JSON ต่อเนื่องกัน"""
     return json.dumps({"intent": "answer", "query": "", "answer": answer, "cacheable": False},
-                        ensure_ascii=False)
+                      ensure_ascii=False)
 
 
 def _context_block(chunks):
@@ -84,6 +102,8 @@ def _context_block(chunks):
 
 
 def _groq_chat(model, system, user, history=()):
+    smart = model in GROQ_SMART_MODELS
+    timeout = LLM_TIMEOUT_SMART_SEC if smart else LLM_TIMEOUT_SEC
     messages = [{"role": "system", "content": system}]
     for u, a in history:
         messages.append({"role": "user", "content": u})
@@ -93,17 +113,17 @@ def _groq_chat(model, system, user, history=()):
         "model": model,
         "messages": messages,
         "temperature": 0.2,
-        "max_completion_tokens": LLM_MAX_TOKENS,
+        "max_completion_tokens": LLM_MAX_TOKENS_SMART if smart else LLM_MAX_TOKENS,
         "response_format": {"type": "json_object"},
     }
     if "gpt-oss" in model:
-        payload["reasoning_effort"] = "low"   # คิดน้อยลง = ตอบเร็วขึ้น
+        payload["reasoning_effort"] = GROQ_REASONING_SMART if smart else GROQ_REASONING_FAST   # คิดน้อย = เร็ว
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
 
-    r = requests.post(GROQ_URL, json=payload, headers=headers, timeout=LLM_TIMEOUT_SEC)
+    r = requests.post(GROQ_URL, json=payload, headers=headers, timeout=timeout)
     if r.status_code == 400 and "reasoning_effort" in payload:
         payload.pop("reasoning_effort")       # โมเดลบางตัวไม่รองรับพารามิเตอร์นี้
-        r = requests.post(GROQ_URL, json=payload, headers=headers, timeout=LLM_TIMEOUT_SEC)
+        r = requests.post(GROQ_URL, json=payload, headers=headers, timeout=timeout)
     if r.status_code != 200:
         raise LLMError(r.status_code, r.text[:200], r.headers.get("retry-after"))
     return r.json()["choices"][0]["message"].get("content") or ""
@@ -138,19 +158,16 @@ def _gemini_chat(model, system, user, history=()):
         contents.append(part("user", u))
         contents.append(part("model", _history_json(a)))
     contents.append(part("user", user))
-    
-    # เปิดใช้งาน Google Search Grounding เพื่อดึงข้อมูลสดเรียลไทม์
-    config_args = {
-        "system_instruction": system,
-        "response_mime_type": "application/json",
-        "temperature": 0.2,
-        "tools": [{"google_search": {}}]  # เพิ่มความสามารถในการค้นหาข้อมูลสด
-    }
-    
     resp = _get_gemini().models.generate_content(
         model=model,
         contents=contents,
-        config=types.GenerateContentConfig(**config_args),
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            response_mime_type="application/json",
+            temperature=0.2,
+            http_options=types.HttpOptions(
+                timeout=int((LLM_TIMEOUT_SMART_SEC if model in GEMINI_SMART_MODELS else LLM_TIMEOUT_SEC) * 1000)),
+        ),
     )
     return resp.text or ""
 
@@ -158,13 +175,21 @@ def _gemini_chat(model, system, user, history=()):
 # ---------------------------------------------------------------------
 # Core
 # ---------------------------------------------------------------------
-def _providers():
+def _models(provider, tier):
+    fast = GROQ_MODELS if provider == "groq" else GEMINI_MODELS
+    smart = GROQ_SMART_MODELS if provider == "groq" else GEMINI_SMART_MODELS
+    if tier == "smart":
+        return list(dict.fromkeys(list(smart) + list(fast)))     # ตัวฉลาดก่อน ล่มแล้วถอยไปตัวเร็ว
+    return list(fast)
+
+
+def _providers(tier="fast"):
     chain = []
     for name in LLM_PROVIDERS:
         if name == "groq" and GROQ_API_KEY:
-            chain.append(("groq", GROQ_MODELS, _groq_chat))
+            chain.append(("groq", _models("groq", tier), _groq_chat))
         elif name == "gemini" and GEMINI_API_KEY:
-            chain.append(("gemini", GEMINI_MODELS, _gemini_chat))
+            chain.append(("gemini", _models("gemini", tier), _gemini_chat))
     return chain
 
 
@@ -205,59 +230,36 @@ def _loads(raw):
     return data if isinstance(data, dict) else None
 
 
-def _parse(data):
-    """Validate and normalize an LLM response."""
-    if isinstance(data, str):
-        data = _loads(data)
-
-    if not isinstance(data, dict):
+def _parse(raw):
+    data = _loads(raw)
+    if data is None:
         return None
 
-    intent = data.get("intent", "answer")
-    answer = data.get("answer", "")
-    cacheable = data.get("cacheable", False)
-
-    # Validate intent
-    if not isinstance(intent, str):
-        return None
-
-    intent = intent.strip().lower()
-
-    if intent not in VALID_INTENTS:
-        return None
-
-    # Normalize answer
-    if not isinstance(answer, str):
-        answer = str(answer) if answer is not None else ""
-
-    answer = answer.strip()
-
-    # Only accept a real JSON boolean.
-    # Avoid bool("false") == True.
-    cacheable = cacheable is True
-
-    # Do not cache actions, unknown intents, or empty answers.
-    if intent != "answer" or not answer:
+    intent = str(data.get("intent") or "").strip()
+    answer = str(data.get("answer") or "").strip()
+    query = str(data.get("query") or "").strip()
+    cacheable = data.get("cacheable") is True
+    if intent == "unknown" and answer:           # LLM บอกว่า "ยืนยันไม่ได้" มาเป็นข้อความ ไม่ใช่คำสั่งที่ไม่เข้าใจ
+        intent, cacheable = "answer", False
+    if intent not in VALID:
+        intent = "answer" if answer else "unknown"
+    if intent == "answer" and not answer:
+        intent = "unknown"
+    if intent != "answer":
         cacheable = False
-
-    return {
-        **data,
-        "intent": intent,
-        "answer": answer,
-        "cacheable": cacheable,
-    }
+        answer = ""
+    return {"intent": intent, "query": query, "answer": answer, "cacheable": cacheable}
 
 
-def _run_chain(system, text, parser, history=()):
+def _run_chain(system, text, parser, history=(), tier="fast"):
     """ไล่ลอง provider/โมเดลตามลำดับ คืนผลที่ parser แปลงได้ หรือ None ถ้าล้มเหลวทั้งหมด"""
-    for provider, models, call in _providers():
+    for provider, models, call in _providers(tier):
         for model in models:
             if _cooldown.get((provider, model), 0) > time.time():
                 continue
             try:
                 started = time.time()
-                raw_resp = call(model, system, text, history)
-                data = parser(raw_resp)
+                data = parser(call(model, system, text, history))
                 if data is None:
                     print(f"⚠️ {provider}:{model} ตอบรูปแบบไม่ถูกต้อง ลองตัวถัดไป")
                     _cooldown[(provider, model)] = time.time() + 15
@@ -272,18 +274,156 @@ def _run_chain(system, text, parser, history=()):
     return None
 
 
-def ask(text, history=None, context=None):
+COMPLEX_CUES = (r"(ทำไม|อย่างไร|ยังไง|อธิบาย|เปรียบเทียบ|แตกต่าง|ต่างกัน|ข้อดี|ข้อเสีย|วิเคราะห์|สรุป|แนะนำ|"
+                r"ควร|เหตุผล|วิธี|สอน|ช่วยคิด|ออกแบบ|แก้ปัญหา|ผลกระทบ|สาเหตุ|ขั้นตอน|เขียน|แปล|คำนวณ|"
+                r"บวก|ลบ|คูณ|หาร|\d+\s*[+\-×x*/÷]\s*\d+)")
+
+
+def choose_tier(text, has_context=False):
+    """เลือกระดับโมเดล: 'smart' เมื่อคำถามยาว/ต้องวิเคราะห์/ต้องเรียบเรียงจากข้อมูลอ้างอิง นอกนั้น 'fast'"""
+    t = re.sub(r"\s+", "", text or "")
+    if has_context or len(t) >= SMART_MIN_CHARS or re.search(COMPLEX_CUES, t):
+        return "smart"
+    return "fast"
+
+
+def _app_catalog():
+    """Only names from locally discovered apps; never send paths to the LLM."""
+    try:
+        import Component.app_manager as app_manager
+        names = sorted({display for _target, display in app_manager.installed_apps().values()})
+        # Keep the prompt bounded on machines with many Start Menu shortcuts.
+        return "รายชื่อโปรแกรมที่สแกนพบ (บางส่วน): " + ", ".join(names[:100]) if names else ""
+    except Exception as exc:
+        print(f"⚠️ อ่านรายการโปรแกรมไม่สำเร็จ: {exc}")
+        return ""
+
+
+def ask(text, history=None, context=None, tier="fast"):
     """ส่งข้อความเข้า LLM รอบเดียว คืน dict (เป็น UNKNOWN ถ้าทุกตัวล้มเหลว)
-    history = [(ผู้ใช้พูด, ราฟาเอลตอบ), ...] ย้อนหลัง  context = [ข้อความอ้างอิง, ...] สำหรับตอบจากฐานความรู้"""
+    history = [(ผู้ใช้พูด, ราฟาเอลตอบ), ...] ย้อนหลัง   context = [ข้อความอ้างอิง, ...] สำหรับตอบจากฐานความรู้
+    tier = "fast" | "smart" (ดู choose_tier)"""
     if not _providers():
         return dict(UNKNOWN)
+    searchable = live_search_available()
+    live_rule = ('\n5. ถ้าคำถามต้องการข้อมูลล่าสุดหรือปัจจุบัน (ตำแหน่งปัจจุบันของใคร ราคา ข่าว ผลการแข่งขัน '
+                 'สภาพอากาศ) ให้ intent = "live_search" และ query = คำถามเต็ม ห้ามตอบเอง ระบบจะค้นข้อมูลสดให้'
+                 if searchable else "")
     system = SYSTEM_PROMPT.format(
-        persona=PERSONA_PROMPT,
-        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        persona=PERSONA_SEARCHABLE if searchable else PERSONA_PROMPT,
+        now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         intents=", ".join(INTENTS),
         context=_context_block(context),
+        live_rule=live_rule,
+        app_catalog=_app_catalog(),
     )
-    return _run_chain(system, text, _parse, tuple(history or ())) or dict(UNKNOWN)
+    return _run_chain(system, text, _parse, tuple(history or ()), tier) or dict(UNKNOWN)
+
+
+# ---------------------------------------------------------------------
+# ค้นข้อมูลสด: Gemini + Google Search (ตอบเป็นข้อความธรรมดา ไม่ใช้โหมด JSON
+# เพราะโหมด JSON กับเครื่องมือค้นหาอาจใช้ร่วมกันไม่ได้ในบางรุ่น)
+# ---------------------------------------------------------------------
+SEARCH_PROMPT = """{persona}
+
+ตอนนี้คือ {now}
+ดิฉันมีผลค้นหาสดจาก Google Search ให้ใช้ตอบคำถามล่าสุดของผู้ใช้ (ดูประวัติการคุยประกอบ)
+กติกา:
+- ตอบเป็นภาษาไทยตามบุคลิกข้างต้น กระชับ ไม่เกิน 3 ประโยค เพราะจะถูกอ่านออกเสียง
+- ห้ามมี markdown อีโมจิ ลิงก์ หรือหมายเลขอ้างอิง
+- ถ้าข้อมูลเปลี่ยนตามเวลา ให้บอกวันที่หรือช่วงเวลาของข้อมูลนั้นสั้นๆ (เช่น "ณ วันที่ ...")
+- ตอบเฉพาะสิ่งที่ผลค้นหายืนยันได้ ถ้าแหล่งขัดแย้งกันหรือหาไม่พบ ให้บอกตรงๆ ว่ายืนยันไม่ได้ ห้ามเดา"""
+
+
+def _usage_today():
+    today = datetime.date.today().isoformat()
+    try:
+        with open(LIVE_SEARCH_USAGE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("date") == today:
+            return data
+    except Exception:
+        pass
+    return {"date": today, "count": 0}
+
+
+def _bump_usage():
+    data = _usage_today()
+    data["count"] += 1
+    try:
+        with open(LIVE_SEARCH_USAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError:
+        pass
+    return data["count"]
+
+
+def live_search_available():
+    """พร้อมค้นข้อมูลสดหรือไม่: เปิดใช้งาน + มี Gemini key + วันนี้ยังไม่ถึงเพดาน"""
+    return bool(LIVE_SEARCH_ENABLED and GEMINI_API_KEY and _usage_today()["count"] < LIVE_SEARCH_DAILY_LIMIT)
+
+
+def _clean_for_speech(text):
+    text = re.sub(r"https?://\S+", "", text or "")
+    text = re.sub(r"\[\d+(?:\s*,\s*\d+)*\]", "", text)         # หมายเลขอ้างอิง [1] [2, 3]
+    text = re.sub(r"[*_#`>~|]+", "", text)                        # สัญลักษณ์ markdown
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > LIVE_ANSWER_MAX_CHARS:
+        cut = text[:LIVE_ANSWER_MAX_CHARS]
+        idx = max(cut.rfind("ค่ะ"), cut.rfind("คะ"), cut.rfind("."))
+        text = cut[:idx + 2] if idx > LIVE_ANSWER_MAX_CHARS * 0.5 else cut.rsplit(" ", 1)[0]
+    return text.strip()
+
+
+def _gemini_search(model, system, user, history=()):
+    from google.genai import types
+
+    def part(role, text):
+        return types.Content(role=role, parts=[types.Part(text=text)])
+
+    contents = []
+    for u, a in history:
+        contents.append(part("user", u))
+        contents.append(part("model", a))
+    contents.append(part("user", user))
+    resp = _get_gemini().models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.2,
+            http_options=types.HttpOptions(timeout=int(LIVE_SEARCH_TIMEOUT_SEC * 1000)),
+        ),
+    )
+    return resp.text or ""
+
+
+def search_answer(question, history=None):
+    """ค้นข้อมูลสดแล้วคืนคำตอบที่พร้อมอ่านออกเสียง หรือ None ถ้าค้นไม่สำเร็จ/ไม่พร้อม"""
+    if not live_search_available():
+        return None
+    system = SEARCH_PROMPT.format(persona=PERSONA_SEARCHABLE,
+                                  now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+    for model in GEMINI_SEARCH_MODELS:
+        key = ("gemini-search", model)
+        if _cooldown.get(key, 0) > time.time():
+            continue
+        try:
+            started = time.time()
+            text = _clean_for_speech(_gemini_search(model, system, question, tuple(history or ())))
+            if not text:
+                print(f"⚠️ gemini-search:{model} ไม่มีข้อความตอบกลับ ลองตัวถัดไป")
+                _cooldown[key] = time.time() + 15
+                continue
+            used = _bump_usage()
+            print(f"🌐 [gemini-search:{model}] {time.time() - started:.1f}s (วันนี้ค้นไปแล้ว {used}/{LIVE_SEARCH_DAILY_LIMIT})")
+            return text
+        except Exception as e:
+            secs, why = _cooldown_seconds(str(e), getattr(e, "retry_after", None))
+            _cooldown[key] = time.time() + secs
+            print(f"⚠️ gemini-search:{model} {why} (พัก {int(secs)} วินาที): {str(e)[:100]}")
+    return None
 
 
 REMINDER_PROMPT = """แปลงประโยคตั้งเตือนภาษาไทยเป็น JSON เท่านั้น รูปแบบ:
@@ -291,66 +431,22 @@ REMINDER_PROMPT = """แปลงประโยคตั้งเตือน�
 ตอนนี้คือ {now}
 - when = วันเวลาที่ต้องเตือน (24 ชั่วโมง) ถ้าไม่ระบุวันและเวลานั้นผ่านไปแล้ววันนี้ ให้เป็นพรุ่งนี้
 - message = สิ่งที่ต้องเตือน ไม่มีคำว่า "เตือน" และไม่มีเวลา
-- ถ้าไม่มีเวลาที่ชัดเจน ให้ when เป็นสตริงว่าง
-"""
-
-
-def validate_reminder_datetime(dt_str: str) -> datetime:
-    """Validate and parse reminder datetime string."""
-    try:
-        dt = datetime.fromisoformat(dt_str)
-        return dt
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"รูปแบบวันที่และเวลาไม่ถูกต้อง: {exc}")
+- ถ้าไม่มีเวลาที่ชัดเจน ให้ when เป็นสตริงว่าง"""
 
 
 def parse_reminder(text):
     """ใช้ LLM แปลงประโยคตั้งเตือนที่ regex อ่านไม่ออก คืน {"when": datetime, "message": str} หรือ None"""
     if not _providers():
         return None
-    system = REMINDER_PROMPT.format(now=datetime.now().strftime("%Y-%m-%d %H:%M (%A)"))
-    
-    def reminder_parser(raw):
-        data = _loads(raw)
-        if not data or not isinstance(data, dict):
-            return None
-        when_str = str(data.get("when") or "").strip()
-        if not when_str:
-            return None
-        try:
-            when = datetime.strptime(when_str, "%Y-%m-%d %H:%M")
-        except ValueError:
-            try:
-                when = datetime.fromisoformat(when_str)
-            except ValueError:
-                return None
-        return {"when": when, "message": str(data.get("message") or "").strip()}
-
-    return _run_chain(system, text, reminder_parser)
-
-
-def femme(text):
-    """แก้คำลงท้ายที่ผิดในข้อความของผู้ช่วย โดยหลีกเลี่ยงการแก้ทั้งข้อความ"""
-    if not text:
-        return text
-
-    # แก้คำลงท้ายที่พบบ่อยในข้อความทั่วไป
-    text = re.sub(r"นะครับ(?=[\s.!?…]|$)", "นะคะ", text)
-    text = re.sub(r"ครับ(?=[\s.!?…]|$)", "ค่ะ", text)
-
-    return text
-
-
-CONFIRMATION_REQUIRED = {
-    "shutdown",
-    "restart",
-    "delete_file",
-    "run_shell",
-}
-
-
-def requires_confirmation(intent: str) -> bool:
-    return intent in CONFIRMATION_REQUIRED
+    system = REMINDER_PROMPT.format(now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M (%A)"))
+    data = _run_chain(system, text, _loads)
+    if not data:
+        return None
+    try:
+        when = datetime.datetime.strptime(str(data.get("when") or "").strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+    return {"when": when, "message": str(data.get("message") or "").strip()}
 
 
 # ---------------------------------------------------------------------
@@ -359,7 +455,7 @@ def requires_confirmation(intent: str) -> bool:
 if __name__ == "__main__":
     if GROQ_API_KEY:
         try:
-            r = requests.get("[https://api.groq.com/openai/v1/models](https://api.groq.com/openai/v1/models)",
+            r = requests.get("https://api.groq.com/openai/v1/models",
                              headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, timeout=8)
             ids = sorted(m["id"] for m in r.json().get("data", []))
             print("Groq models:", ", ".join(ids))
@@ -378,13 +474,8 @@ if __name__ == "__main__":
         print("ยังไม่ได้ตั้ง GEMINI_API_KEY")
 
     for q in ("ใครเป็นคนสร้างเว็บไซต์ยูทูป", "เพิ่มเสียงหน่อย"):
-        print(q, "->", ask(q))
-
-    try:
-        reminder_dt = validate_reminder_datetime(
-            "2027-01-01T09:00:00+07:00"
-        )
-    except ValueError as exc:
-        print(f"ตั้งเตือนไม่สำเร็จ: {exc}")
+        print(q, "->", choose_tier(q), "->", ask(q, tier=choose_tier(q)))
+    if live_search_available():
+        print("ทดสอบค้นข้อมูลสด:", search_answer("ตอนนี้ราคาทองคำแท่งเท่าไร"))
     else:
-        print(f"เวลาที่ตั้งเตือน: {reminder_dt.isoformat()}")
+        print("ค้นข้อมูลสดยังไม่พร้อม (ไม่มี GEMINI_API_KEY / ปิดไว้ / ถึงเพดานวันนี้)")
