@@ -1,4 +1,5 @@
 import ctypes
+import Component.translator
 
 # ต้องตั้ง DPI awareness ก่อน import อย่างอื่น ไม่เช่นนั้นพิกัดการจับภาพกับพิกัดเมาส์จะไม่ตรงกัน
 try:
@@ -17,8 +18,16 @@ def run_command(text):
     print("🧠 กำลังวิเคราะห์คำสั่ง...")
     intent_result = interpret(text)
     print(f"🤖 ผลลัพธ์: {intent_result}")
+    
+    # ดึงค่า intent ออกมาตรวจสอบ
+    intent = intent_result.get('intent') if isinstance(intent_result, dict) else ""
+    
+    # เช็กว่าถ้า Intent คือแปล หรือในประโยคมีคำว่า "แปล"
+    if intent == 'translate' or 'แปล' in text:
+        Component.translator.translate_selected_text()
+        return False  # ทำงานเสร็จแล้ว ให้ระบบสแตนด์บายต่อ ไม่จบการทำงานโปรแกรม
+        
     return handle_command(intent_result, text)
-
 
 def main():
     speak("มีอะไรให้ ราฟาเอล ช่วยคะ")
