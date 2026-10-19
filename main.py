@@ -11,28 +11,36 @@ from speech import speak, record_and_recognize
 from ad_skipper import start_auto_skip_ads, stop_auto_skip_ads
 from reminder import start_reminder_system, stop_reminder_system, pop_due, handle_due
 from assistant import find_wake_word, strip_wake_words, interpret, handle_command
-
+from Component.widget import start_widget_thread, set_widget_state
 
 def run_command(text):
     """วิเคราะห์และสั่งงาน คืน True ถ้าผู้ใช้สั่งปิดระบบ"""
     print("🧠 กำลังวิเคราะห์คำสั่ง...")
+    
+    # กำลังวิเคราะห์/คิดคำตอบ -> เปลี่ยน Widget เป็นสีม่วง (thinking)
+    set_widget_state("thinking")
+    
     intent_result = interpret(text)
     print(f"🤖 ผลลัพธ์: {intent_result}")
     
-    # ดึงค่า intent ออกมาตรวจสอบ
     intent = intent_result.get('intent') if isinstance(intent_result, dict) else ""
     
-    # เช็กว่าถ้า Intent คือแปล หรือในประโยคมีคำว่า "แปล"
     if intent == 'translate' or 'แปล' in text:
         Component.translator.translate_selected_text()
-        return False  # ทำงานเสร็จแล้ว ให้ระบบสแตนด์บายต่อ ไม่จบการทำงานโปรแกรม
+        set_widget_state("hidden") # ทำงานเสร็จ ซ่อน Widget
+        return False
         
-    return handle_command(intent_result, text)
+    res = handle_command(intent_result, text)
+    set_widget_state("hidden") # ทำงานเสร็จ ซ่อน Widget
+    return res
 
 def main():
+    start_widget_thread()
+    set_widget_state("speaking")
     speak("มีอะไรให้ ราฟาเอล ช่วยคะ")
     start_auto_skip_ads()
     start_reminder_system()
+    set_widget_state("hidden")
     try:
         while True:
             try:
@@ -40,8 +48,8 @@ def main():
                 # เพื่อไม่ให้แย่งไมค์/ลำโพงกับลูปรอฟังคำสั่ง (อาจหน่วงได้ไม่เกินราว 6 วินาที)
                 for entry in pop_due():
                     handle_due(entry)
- 
                 command = record_and_recognize()
+                set_widget_state("hidden")
                 if not (command and find_wake_word(command)):
                     continue
  

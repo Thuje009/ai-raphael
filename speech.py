@@ -10,6 +10,7 @@ import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
 from scipy.io.wavfile import write
+from Component.widget import set_widget_state
 
 try:
     from gtts import gTTS    # pip install gTTS
@@ -90,11 +91,13 @@ def speak(message, say=None):
     os.makedirs(TTS_CACHE_DIR, exist_ok=True)
     path = None
     try:
+        set_widget_state("speaking")
         path = _get_audio(clean)
         play_mp3(path)
     except Exception as e:
         print(f"⚠️ พูดไม่สำเร็จ: {e}")
     finally:
+        set_widget_state("hidden")
         # ประโยคสั้น (ที่ใช้ซ้ำบ่อย) เก็บไว้ ส่วนประโยคยาว (คำตอบ) ลบทิ้ง
         if path and len(clean) > TTS_CACHE_MAX_CHARS:
             for p in (path, path + ".part"):
