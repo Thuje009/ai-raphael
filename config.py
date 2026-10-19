@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import json
 
 # อ่านค่าจากไฟล์ .env ถ้ามี (pip install python-dotenv) ไม่มีก็ข้ามไป
 try:
@@ -8,13 +9,74 @@ try:
 except ImportError:
     pass
 
+
+DEFAULT_WAKE_WORDS = [
+    "ผู้ช่วย",
+]
+DEFAULT_WAKE_DISPLAY = "ผู้ช่วย"
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+
+def load_user_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def get_assistant_name():
+    config = load_user_config()
+    name = config.get("assistant_name", DEFAULT_WAKE_DISPLAY)
+
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+
+    return DEFAULT_WAKE_DISPLAY
+
+
+def get_wake_words() -> list[str]:
+    config = load_user_config()
+    words = config.get("wake_words", DEFAULT_WAKE_WORDS)
+
+    if isinstance(words, str):
+        words = [words]
+
+    if isinstance(words, list):
+        words = [
+            word.strip()
+            for word in words
+            if isinstance(word, str) and word.strip()
+        ]
+        if words:
+            return words
+
+    return DEFAULT_WAKE_WORDS.copy()
+
+
+def reload_user_config():
+    """โหลดชื่อและคำเรียกล่าสุดจาก config.json"""
+    global WAKE_WORDS, WAKE_DISPLAY
+
+    WAKE_WORDS = get_wake_words()
+    WAKE_DISPLAY = get_assistant_name()
+
+    print(f"[Config] ชื่อผู้ช่วยล่าสุด: {WAKE_DISPLAY}")
+    print(f"[Config] คำเรียกที่รองรับ: {WAKE_WORDS}")
+    
+WAKE_WORDS = DEFAULT_WAKE_WORDS.copy()
+WAKE_DISPLAY = DEFAULT_WAKE_DISPLAY
+
+reload_user_config()
 
 # =====================================================================
 # Wake word / Debug
 # =====================================================================
-WAKE_WORDS = ("raphael", "rafael", "ราฟาเอล", "ราฟาแอล", "ราฟาเอ็ล", "ราฟา")
-WAKE_DISPLAY = "ราฟาเอล"
+# WAKE_WORDS = ("raphael", "rafael", "ราฟาเอล", "ราฟาแอล", "ราฟาเอ็ล", "ราฟา")
+# WAKE_DISPLAY = "ราฟาเอล"
 DEBUG_MIC = True
 
 # =====================================================================
@@ -126,3 +188,23 @@ LIVE_SEARCH_TIMEOUT_SEC = 20
 LIVE_SEARCH_DAILY_LIMIT = 100
 LIVE_ANSWER_MAX_CHARS = 450          # ตัดคำตอบที่ยาวเกินไปก่อนอ่านออกเสียง
 LIVE_SEARCH_USAGE_FILE = os.path.join(BASE_DIR, "live_search_usage.json")
+
+PERSONA_STYLE = "futuristic_friendly"
+
+PERSONA_FEMALE = True
+
+# ระดับความเป็นมิตร (0.0 - 1.0)
+PERSONA_WARMTH = 0.8
+
+# ระดับความขี้เล่น
+PERSONA_PLAYFULNESS = 0.35
+
+# ความยาวคำตอบปกติ
+RESPONSE_STYLE = "concise"
+
+# เรียกชื่อผู้ใช้เฉพาะเมื่อเหมาะสม
+USE_OWNER_NAME = False
+
+# ตอบรับเมื่อถูกเรียก
+WAKE_ACK_ENABLED = True
+WAKE_ACK_TEXT = "ราฟาเอลพร้อมแล้วค่ะ"

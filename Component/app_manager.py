@@ -128,6 +128,17 @@ def resolve(name):
 
 
 def open_app(name):
+    query_lower = name.lower().strip()
+    
+    # ทางลัดพิเศษสำหรับ Discord เพื่อแก้ปัญหาหา path ไม่เจอ
+    if "ดิสคอร์ด" in query_lower or "discord" in query_lower:
+        try:
+            # ใช้ Windows Protocol เปิด Discord โดยตรง
+            os.system("start discord:")
+            return True, "Discord"
+        except Exception as e:
+            return False, str(e)
+
     found = resolve(name)
     if not found:
         return False, 'ไม่พบโปรแกรมหรือพบชื่อที่ไม่ชัดเจน'
@@ -137,6 +148,18 @@ def open_app(name):
         return True, display
     except OSError as exc:
         return False, str(exc)
+
+
+def close_app(name):
+    query_lower = name.lower().strip()
+    
+    # ทางลัดพิเศษสำหรับปิด Discord ให้ตรงชื่อ process
+    if "ดิสคอร์ด" in query_lower or "discord" in query_lower:
+        try:
+            os.system("taskkill /f /im Discord.exe >nul 2>&1")
+            return True, "Discord"
+        except Exception as e:
+            return False, str(e)
 
 
 def close_app(name):

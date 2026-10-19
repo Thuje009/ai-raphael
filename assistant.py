@@ -13,6 +13,9 @@ import Component.app_manager
 import Component.macro_manager
 import Component.translator
 import Component.pc_monitor
+from config import BASE_DIR, WAKE_WORDS, FILE_MATCH_THRESHOLD, get_wake_words, get_assistant_name
+
+assistant_name = get_assistant_name()
 
 import pyautogui
 import pygetwindow as gw
@@ -27,7 +30,6 @@ import conversation
 import knowledge
 import llm
 from common import GUI_LOCK
-from config import BASE_DIR, WAKE_WORDS, FILE_MATCH_THRESHOLD
 from knowledge import DAYS_TH, MONTHS_TH
 from logger import log_unknown_command
 from speech import speak, record_and_recognize
@@ -49,12 +51,26 @@ def has_any(text, words):
     return any(w in text for w in words)
 
 def find_wake_word(text):
-    return next((w for w in sorted(WAKE_WORDS, key=len, reverse=True) if w in text), None)
+    return next((w for w in sorted(assistant_name, key=len, reverse=True) if w in text), None)
 
 def strip_wake_words(text):
-    for w in sorted(WAKE_WORDS, key=len, reverse=True):
-        text = text.replace(w, "")
-    return text.strip()
+    if not text:
+        return ""
+        
+    # ดึงรายการคำปลุกและเรียงจากยาวไปสั้น เพื่อป้องกันการตัดคำสั้นก่อนคำยาว
+    wake_words = sorted(get_wake_words(), key=len, reverse=True)
+    
+    for w in wake_words:
+        if text.startswith(w):
+            text = text[len(w):].strip()
+            break
+        elif w in text:
+            # ใช้ replace แบบระมัดระวัง หรือตัดเฉพาะคำที่พบ
+            text = text.replace(w, "").strip()
+    
+    # ตัดคำเชื่อมหรือคำลงท้ายที่มักติดมาหลังเรียกชื่อ เช่น "ครับ", "คะ", "ค่ะ", "จ๋า", "ช่วย"
+    text = re.sub(r"^(ครับ|คะ|ค่ะ|จ๋า|หน่อย|ช่วย|นะ)\s*", "", text).strip()
+    return text
 
 # =====================================================================
 # Dynamic App Scanner: implementation lives in Component.app_manager.py.
@@ -103,25 +119,28 @@ def interpret_basic(text):
     if has_any(text, ["แปลภาษา", "แปลตรงนี้", "แปลข้อความ", "แปลให้หน่อย", "แปลว่าอะไร"]):
         return result("translate_text")
 
-    # --- ปรับแก้ตรงนี้ให้นำคำว่า จดโน้ต และ บันทึกข้อมูล มารวมไว้ด้วยกัน ---
+# 1. ดักจับคำสั่งปิดสมุดบันทึก/Notepad ก่อนเป็นอันดับแรก
+    if has_any(text, ["ปิดสมุดบันทึก", "ปิดโน้ต", "ปิดแพด"]):
+        return result("close_notepad")
+
+    # 2. กลุ่มคำสั่งเปิด/อ่านโน้ต
     if has_any(
-    text,
-    [
-        "เปิดโน้ต",
-        "เปิดสมุดโน้ต",
-        "ดูโน้ต",
-        "อ่านโน้ต",
-        "โน้ตที่บันทึก",
-        "บันทึกเมื่อกี้",
-    ],
+        text,
+        [
+            "เปิดโน้ต",
+            "เปิดสมุดโน้ต",
+            "ดูโน้ต",
+            "อ่านโน้ต",
+            "โน้ตที่บันทึก",
+            "บันทึกเมื่อกี้",
+        ],
     ):
         return result("read_notes")
+
+    # 3. กลุ่มคำสั่งบันทึกข้อมูล (วางไว้ทีหลัง เพื่อไม่ให้แย่งคำว่า "บันทึก")
     if has_any(text, ["บันทึกลงไฟล์", "บันทึกใส่ไฟล์", "จดลงไฟล์", "สร้างโน้ต", "จดโน้ต", "บันทึกข้อมูล", "บันทึกโน้ต", "บันทึกข้อความ", "บันทึก"]):
         return result("save_note", Component.time_reminder.strip_phrases(text, ["บันทึกลงไฟล์", "บันทึกใส่ไฟล์", "จดลงไฟล์", "สร้างโน้ต", "จดโน้ต", "บันทึกข้อมูล", "บันทึกโน้ต", "ให้หน่อย", "หน่อย"]))
-  
-    if has_any(text, ["บันทึกข้อความ", "เขียนโน้ต", "โน้ตไว้ว่า", "บันทึก"]):
-        return result("write_notepad", Component.time_reminder.strip_phrases(text, ["บันทึกข้อความ", "เขียนโน้ต", "โน้ตไว้ว่า", "ให้หน่อย", "หน่อย"]))
-    # -------------------------------------------------------------
+    
     if re.search(r"\d", text) and has_any(text, ["วันอะไร", "เป็นวัน"]):
         return result("check_specific_date", text)
     if has_any(text, ["วันนี้วันอะไร", "วันอะไรแล้ว", "วันที่เท่าไร", "วันที่เท่าไหร่", "วันนี้วันที่", "พรุ่งนี้วันอะไร", "เมื่อวานวันอะไร", "มะรืนวันอะไร"]):

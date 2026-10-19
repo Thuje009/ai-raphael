@@ -12,6 +12,7 @@ import re
 import threading
 import uuid
 from datetime import date, datetime, time as dtime, timedelta
+from config import get_assistant_name
 
 from config import (BASE_DIR, REMINDER_CHECK_SEC, REMINDER_MAX_REPEAT, REMINDER_REPEAT_GAP_SEC,
                     REMINDER_SNOOZE_MIN, REMINDER_LATE_MIN, REMINDER_KEEP_DAYS)
@@ -336,7 +337,8 @@ def handle_due(entry):
             speak("บันทึกการรับทราบเรียบร้อยครับ")
             return "ack"
         if kind == "deny":
-            speak("รายงาน ราฟาเอลทำหน้าที่แจ้งเตือนแล้ว ท่านไม่รับทราบเองไม่ใช่ความผิดของราฟาเอล แล้วขอบคุณค่ะ")
+            assistant_name = get_assistant_name()
+            speak(f"รายงาน {assistant_name} ทำหน้าที่แจ้งเตือนแล้ว ท่านไม่รับทราบเองไม่ใช่ความผิดของ{assistant_name} แล้วขอบคุณค่ะ")
             return "deny"
         if kind == "snooze":
             m = re.search(r"(\d+)\s*นาที", reply)
