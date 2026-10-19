@@ -164,20 +164,33 @@ def auto_skip_ads_loop():
                 if DEBUG_AD_SKIPPER and MATCH_THRESHOLD - 0.1 <= best_val < MATCH_THRESHOLD and now - last_debug_time > 2:
                     print(f"🔍 AdSkipper: คะแนนสูงสุด {best_val:.2f} ({best_name}) ยังไม่ถึงเกณฑ์ {MATCH_THRESHOLD}")
                     last_debug_time = now
-
                 if best_val >= MATCH_THRESHOLD and best_loc is not None:
                     if now - last_click_time > CLICK_COOLDOWN:
                         tw, th = best_size
-                        cx = left + best_loc[0] + tw // 2 + CLICK_OFFSET_X
-                        cy = top + best_loc[1] + th // 2 + CLICK_OFFSET_Y
+                        
+                        # 1. พิกัดกึ่งกลางปุ่มในภาพที่จับมา (Physical Pixel)
+                        phys_x = left + best_loc[0] + tw // 2
+                        phys_y = top + best_loc[1] + th // 2
+                        
+                        # 2. แปลงพิกัดตามสเกลจอบน Windows (อัตราส่วน 3456/1920 ≈ 1.25 หรือ 1.5 ตามจริง)
+                        # หากอยู่บนจอ 2 (X >= 1920) ให้แปลงสเกลเฉพาะส่วนของจอ 2
+                        if phys_x >= 1920:
+                            scale_x = 1536 / 1920 # อัตราส่วนความกว้าง Physical / Logical ของจอ 2
+                            scale_y = 864 / 1080  # อัตราส่วนความสูง Physical / Logical ของจอ 2
+                            
+                            cx = int(1920 + (phys_x - 1920) * scale_x) + CLICK_OFFSET_X
+                            cy = int(97 + (phys_y - 97) * scale_y) + CLICK_OFFSET_Y
+                        else:
+                            cx = phys_x + CLICK_OFFSET_X
+                            cy = phys_y + CLICK_OFFSET_Y
 
-                        print(f"🎯 พบปุ่มข้ามโฆษณา! ({best_name}, {best_val:.2f}) ที่ X:{cx} Y:{cy}")
+                        print(f"🎯 พบปุ่มข้ามโฆษณา! ({best_name}, {best_val:.2f}) คำนวณคลิกที่ X:{cx} Y:{cy}")
                         with GUI_LOCK:
                             old_pos = pyautogui.position()
                             pyautogui.click(cx, cy)
                             pyautogui.moveTo(old_pos)
                         last_click_time = now
-                        print("⏭️ RAPHAEL: กดข้ามโฆษณาแล้ว")
+
 
                 skipper_stop.wait(AD_SCAN_INTERVAL_SEC)
             except Exception as e:
