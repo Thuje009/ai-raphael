@@ -1,5 +1,4 @@
 """ระบบคัดลอกข้อความและแปลภาษาของราฟาเอล"""
-import threading
 import time
 import pyautogui
 import pyperclip
@@ -7,40 +6,70 @@ import llm
 from common import GUI_LOCK
 from speech import speak
 
-def _clear_clipboard_after(delay_seconds=300):
-    """ฟังก์ชันทำงานเบื้องหลัง: รอตามเวลาที่กำหนด (ค่าเริ่มต้น 5 นาที = 300 วินาที) แล้วเคลียร์ Clipboard"""
-    time.sleep(delay_seconds)
+MAX_CHARS = 1500  # ยาวกว่านี้จะตัดทิ้ง กันพูดยาวเกินและกันส่งข้อความมหาศาลเข้า LLM
+
+# ข้อความที่แสดงว่าผู้ใช้เผลอลากเลือก "log ของราฟาเอลเอง" ในหน้าต่างคอนโซล
+_OWN_LOG_MARKERS = ("กำลังสแตนด์บาย", "กำลังวิเคราะห์คำสั่ง", "ระดับเสียงสูงสุด", "🧠", "🎙️")
+
+
+def _thai_ratio(text):
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    thai = [c for c in letters if "\u0e00" <= c <= "\u0e7f"]
+    return len(thai) / len(letters)
+
+
+def _grab_selection(timeout=1.0):
+    """คัดลอกข้อความที่เลือกอยู่ แล้วคืนค่า (ข้อความ, คลิปบอร์ดเดิม)
+    เคลียร์คลิปบอร์ดก่อนคัดลอก เพื่อให้รู้แน่ว่าได้ข้อความใหม่ ไม่ใช่ของเก่าที่ค้างอยู่"""
     try:
-        # ตรวจสอบก่อนว่าข้อความปัจจุบันยังเป็นข้อความเดิมที่เพิ่งแปลไปไหม ถ้าใช่ค่อยเคลียร์เพื่อความปลอดภัย
-        pyperclip.copy("")
+        old_clip = pyperclip.paste()
+    except Exception:
+        old_clip = ""
+
+    pyperclip.copy("")
+    with GUI_LOCK:
+        pyautogui.hotkey("ctrl", "c")
+
+    text = ""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.1)
+        text = pyperclip.paste().strip()
+        if text:
+            break
+    return text, old_clip
+
+
+def translate_selected_text():
+    selected_text, old_clip = _grab_selection()
+
+    # คืนคลิปบอร์ดเดิมของผู้ใช้ทันที ข้อความที่แปลจึงไม่ค้างในคลิปบอร์ด
+    # (แทนการรอ 5 นาทีแล้วลบทิ้ง ซึ่งอาจลบของที่ผู้ใช้เพิ่งคัดลอกใหม่)
+    try:
+        pyperclip.copy(old_clip)
     except Exception:
         pass
 
-def translate_selected_text():
-    with GUI_LOCK:
-        pyautogui.hotkey('ctrl', 'c')
-    
-    time.sleep(0.2)
-    selected_text = pyperclip.paste().strip()
-    
-    # ถ้าไม่มีข้อความใน Clipboard หรือเป็นข้อความเก่าที่เคยแปลไปแล้ว
-    if not selected_text or len(selected_text) < 2:
-        speak("ไม่พบข้อความที่เลือกค่ะ กรุณาเอาเมาส์ลากคุมข้อความที่ต้องการแปลก่อนสั่งนะคะ")
-        return
-    with GUI_LOCK:
-        pyautogui.hotkey('ctrl', 'c')
-    
-    time.sleep(0.2) # รอระบบคัดลอกข้อความแป๊บหนึ่ง
-    
-    selected_text = pyperclip.paste().strip()
-    
-    if not selected_text or len(selected_text) < 2:
-        speak("ไม่พบข้อความที่เลือกไว้ค่ะ กรุณาเอาเมาส์ลากคุมข้อความก่อนสั่งนะคะ")
+    if len(selected_text) < 2:
+        speak("ไม่พบข้อความที่เลือกค่ะ กรุณาลากคลุมข้อความที่ต้องการแปลก่อนสั่งนะคะ")
         return
 
-    speak("กำลังแปลภาษาให้ค่ะ")
-    
-    # 2. ส่งข้อความไปให้ LLM แปลภาษา
+    if any(m in selected_text for m in _OWN_LOG_MARKERS):
+        speak("ข้อความที่เลือกเป็นบันทึกการทำงานของดิฉันเองค่ะ กรุณาเลือกข้อความที่ต้องการแปลจากหน้าต่างอื่นนะคะ")
+        return
+
+    if _thai_ratio(selected_text) > 0.5:
+        speak("ข้อความที่เลือกเป็นภาษาไทยอยู่แล้วค่ะ")
+        return
+
+    if len(selected_text) > MAX_CHARS:
+        selected_text = selected_text[:MAX_CHARS]
+        speak("ข้อความยาวมากค่ะ ดิฉันจะแปลเฉพาะช่วงต้นนะคะ")
+    else:
+        speak("กำลังแปลภาษาให้ค่ะ")
+
     prompt = f"""แปลข้อความต่อไปนี้เป็นภาษาไทยให้อ่านเข้าใจง่าย สละสลวย และตรงประเด็น:
 "{selected_text}"
 คำตอบไม่ต้องมีคำเกริ่น นำเสนอผลการแปลทันที"""
@@ -48,12 +77,8 @@ def translate_selected_text():
     try:
         translated = llm.ask(prompt, history=[], tier="fast")
         reply = translated.get("answer") if isinstance(translated, dict) else str(translated)
-        
-        if reply:
-            speak(reply)
-            
-            # 3. เปิดเธรดเบื้องหลังเพื่อนับถอยหลัง 5 นาที (300 วินาที) แล้วล้าง Clipboard อัตโนมัติ
-            threading.Thread(target=_clear_clipboard_after, args=(300,), daemon=True).start()
+        if reply and reply.strip():
+            speak(reply.strip())
         else:
             speak("แปลภาษาไม่สำเร็จในขณะนี้ค่ะ")
     except Exception as e:

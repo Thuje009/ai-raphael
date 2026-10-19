@@ -4,6 +4,8 @@ import os
 import re
 from config import BASE_DIR
 from speech import record_and_recognize, speak
+from Component.widget import start_widget_thread, set_widget_state
+
 
 NOTE_FILE = os.path.join(BASE_DIR, "my_notes.txt")
 
@@ -46,6 +48,7 @@ def interactive_note_session(initial_query=""):
 
   while True:
     # เปิดฟังยาวๆ โดยไม่มีเสียงพูดตอบกลับระหว่างทางมารบกวน
+    set_widget_state("listening")
     speech = record_and_recognize("กำลังฟังโน้ตของคุณ... (พูดต่อได้เลยค่ะ)")
 
     if not speech:
