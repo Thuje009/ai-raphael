@@ -17,6 +17,7 @@ from ad_skipper import start_auto_skip_ads, stop_auto_skip_ads
 from reminder import start_reminder_system, stop_reminder_system, pop_due, handle_due
 from assistant import find_wake_word, strip_wake_words, interpret, handle_command
 from Component.widget import start_widget_thread, set_widget_state
+from Component.ig_bot import start_ig_bot_thread, IG_BUSY
 
 
 # --- จุดแก้ไข 2: ลบ import _config_data ที่เป็นปัญหาออก ---
@@ -85,28 +86,36 @@ def main():
     start_reminder_system()
     set_widget_state("hidden")
 
-    # --- [จุดแก้ไข 4: โหลดและสั่งรัน Telegram Bot จากที่นี่] ---
-    # ดึง Token จาก Config ที่โหลดมาแล้ว
+    # --- โหลดและสั่งรัน Telegram Bot ---
     telegram_token = config_data.get("telegram_bot_token", "")
     
     if telegram_token and telegram_token.strip() != "":
         print("📱 [System] เริ่มต้นระบบ Telegram Bot สแตนด์บายรับคำสั่งจากมือถือแล้วค่ะ")
-        # สั่งรันบอทใน background thread
         start_telegram_bot_thread(telegram_token)
     else:
         print("⚠️ [System] แจ้งเตือน: ไม่พบ Telegram Bot Token หรือยังไม่ได้ใส่ Token จริงใน config.json")
-        print("   -> ระบบสั่งงานผ่านมือถือจะไม่ทำงาน (ถ้าต้องการใช้ ให้ใส่ Token ใน config.json แล้วรันใหม่)")
-    # --------------------------------------------------------
+        print("   -> ระบบสั่งงานผ่านมือถือจะไม่ทำงาน")
     
+    # เริ่มต้นระบบสแตนด์บายตรวจจับแชท IG
+    print("🤖 [System] เริ่มต้นระบบ Instagram Bot สแตนด์บายตรวจจับข้อความแล้วค่ะ")
+    start_ig_bot_thread()
+
     try:
         while True:
             try:
-                # เธรดเช็กเวลาแค่ส่งรายการที่ถึงเวลามาใส่คิว การพูดและฟังคำตอบทำที่นี่ (เธรดหลัก)
-                # เพื่อไม่ให้แย่งไมค์/ลำโพงกับลูปรอฟังคำสั่ง (อาจหน่วงได้ไม่เกินราว 6 วินาที)
+                # ถ้า IG Bot กำลังใช้งานไมค์อยู่ ให้ลูปหลักข้ามการฟังไปก่อน
+                if IG_BUSY.is_set():
+                    time.sleep(0.5)
+                    continue
+
+                # เธรดเช็กเวลาแจ้งเตือน
                 for entry in pop_due():
                     handle_due(entry)
+                
+                # รับคำสั่งเสียงจากผู้ใช้ในลูปหลัก
                 command = record_and_recognize()
                 set_widget_state("hidden")
+                
                 if not (command and find_wake_word(command)):
                     continue
  
@@ -123,14 +132,12 @@ def main():
             except KeyboardInterrupt:
                 raise
             except Exception as e:
-                # ข้อผิดพลาดจากคำสั่งเดียวไม่ควรทำให้ผู้ช่วยดับทั้งโปรแกรม
                 print(f"⚠️ เกิดข้อผิดพลาด: {e}")
     except KeyboardInterrupt:
         print("\n👋 หยุดการทำงานด้วย Ctrl+C")
     finally:
         stop_auto_skip_ads()
         stop_reminder_system()
-
-
+        
 if __name__ == "__main__":
     main()
