@@ -29,16 +29,33 @@ INTENTS = [
     "open_settings", "close_settings",             
     "open_control_panel", "close_control_panel",   
     "get_time", "get_date", "check_specific_date",
-    "write_notepad", "save_note",
+    "save_note", "read_notes",
     "set_reminder", "list_reminders", "cancel_reminders",
     "lock_screen", "close_window",
     "shutdown_pc", "restart_pc", "sleep_pc", "cancel_shutdown",
     "live_search", "exit_system", "unknown",
     "close_other_windows",
+    "pc_status", "scan_virus", "run_macro", "translate_text",
 ]
 VALID = set(INTENTS) | {"answer"}
 
 UNKNOWN = {"intent": "unknown", "query": "", "answer": "", "cacheable": False}
+
+# intent ที่ไม่ได้อยู่ใน COMMANDS แต่ main.py จัดการเอง
+SPECIAL_INTENTS = {"live_search", "exit_system", "unknown", "answer"}
+
+# intent ที่ต้องถามยืนยันก่อนทำเสมอ ไม่ว่ามาจาก keyword หรือ LLM (ให้ main.py ตรวจก่อนเรียก handler)
+NEED_CONFIRM = {"shutdown_pc", "restart_pc", "sleep_pc", "close_other_windows", "close_chrome"}
+
+
+def check_handlers(commands):
+    """เรียกตอนสตาร์ต: เตือนถ้า INTENTS กับ COMMANDS ไม่ตรงกัน"""
+    missing = set(INTENTS) - set(commands) - SPECIAL_INTENTS
+    extra = set(commands) - set(INTENTS)
+    if missing:
+        print("⚠️ INTENTS ที่ไม่มี handler ใน COMMANDS:", ", ".join(sorted(missing)))
+    if extra:
+        print("⚠️ COMMANDS ที่ LLM สั่งไม่ได้ (ไม่อยู่ใน INTENTS):", ", ".join(sorted(extra)))
 
 SYSTEM_PROMPT = """{persona}
 
@@ -53,7 +70,8 @@ SYSTEM_PROMPT = """{persona}
    ชื่อโปรแกรมที่ไม่อยู่ในรายการที่สแกน ให้ตอบว่าไม่พบโปรแกรม อย่าเดาชื่อหรือเปลี่ยนเป็นโปรแกรมอื่น
    YouTube เป็นเว็บไซต์ ให้ใช้ open_youtube / close_youtube ไม่ใช่ open_app / close_app
    หากเป็นคำสั่งควบคุมคอมพิวเตอร์ ให้ cacheable = false
-   ถ้า intent เป็น set_reminder หรือ cancel_reminders ให้ query = ข้อความเดิมของผู้ใช้ทั้งประโยค
+   ถ้า intent เป็น set_reminder, cancel_reminders หรือ run_macro ให้ query = ข้อความเดิมของผู้ใช้ทั้งประโยค
+   pc_status = ถามสถานะเครื่อง, scan_virus = สั่งสแกนไวรัส, translate_text = สั่งแปลข้อความที่เลือกไว้, read_notes = เปิดดูโน้ต
 2. ถ้าเป็นคำถามหรือชวนคุย ให้ intent = "answer" และ answer = คำตอบภาษาไทยตามบุคลิกข้างต้น
    กระชับ ไม่เกิน 3 ประโยค ห้ามมี markdown อีโมจิ หรือลิงก์ เพราะจะถูกอ่านออกเสียง
 3. cacheable = true เฉพาะคำตอบที่ไม่เปลี่ยนตามเวลาและไม่พึ่งบริบทการคุย (ประวัติศาสตร์ ความรู้ทั่วไป)
@@ -197,14 +215,24 @@ def llm_available():
     return bool(_providers())
 
 
-def _cooldown_seconds(msg, retry_after=None):
-    """ตัดสินว่าควรพักโมเดลนี้นานแค่ไหน แทนการแบนถาวรทั้งเซสชัน"""
+def _status_of(e):
+    """ดึง HTTP status เป็นตัวเลขจาก exception (Groq: .status, Gemini SDK: .code)"""
+    for attr in ("status", "code", "status_code"):
+        v = getattr(e, attr, None)
+        if isinstance(v, int):
+            return v
+    return None
+
+
+def _cooldown_seconds(msg, retry_after=None, status=None):
+    """ตัดสินว่าควรพักโมเดลนี้นานแค่ไหน แทนการแบนถาวรทั้งเซสชัน
+    ใช้ status จริงเป็นหลัก ไม่เดาจากตัวเลขในข้อความ error"""
     low = msg.lower()
-    if any(k in low for k in ("404", "not_found", "model_not_found", "decommission", "does not exist")):
+    if status == 404 or any(k in low for k in ("not_found", "model_not_found", "decommission", "does not exist")):
         return 6 * 3600, "ไม่พบโมเดลนี้ (ชื่อผิดหรือถูกปลดแล้ว)"
-    if any(k in low for k in ("401", "403", "api key", "api_key", "permission", "unauthorized")):
+    if status in (401, 403) or any(k in low for k in ("api key", "api_key", "permission", "unauthorized")):
         return 3600, "API key มีปัญหา"
-    if "429" in low or "resource_exhausted" in low or "rate limit" in low:
+    if status == 429 or "resource_exhausted" in low or "rate limit" in low:
         try:
             wait = max(5, min(float(retry_after), 600))
         except (TypeError, ValueError):
@@ -259,7 +287,11 @@ def _run_chain(system, text, parser, history=(), tier="fast"):
                 continue
             try:
                 started = time.time()
-                data = parser(call(model, system, text, history))
+                data = None
+                for _attempt in range(2):          # รูปแบบเพี้ยน ลองซ้ำอีกครั้งก่อนพักโมเดล
+                    data = parser(call(model, system, text, history))
+                    if data is not None:
+                        break
                 if data is None:
                     print(f"⚠️ {provider}:{model} ตอบรูปแบบไม่ถูกต้อง ลองตัวถัดไป")
                     _cooldown[(provider, model)] = time.time() + 15
@@ -267,8 +299,7 @@ def _run_chain(system, text, parser, history=(), tier="fast"):
                 print(f"🧠 [{provider}:{model}] {time.time() - started:.1f}s")
                 return data
             except Exception as e:
-                retry_after = getattr(e, "retry_after", None)
-                secs, why = _cooldown_seconds(str(e), retry_after)
+                secs, why = _cooldown_seconds(str(e), getattr(e, "retry_after", None), _status_of(e))
                 _cooldown[(provider, model)] = time.time() + secs
                 print(f"⚠️ {provider}:{model} {why} (พัก {int(secs)} วินาที): {str(e)[:100]}")
     return None
@@ -282,6 +313,9 @@ COMPLEX_CUES = (r"(ทำไม|อย่างไร|ยังไง|อธิ�
 def choose_tier(text, has_context=False):
     """เลือกระดับโมเดล: 'smart' เมื่อคำถามยาว/ต้องวิเคราะห์/ต้องเรียบเรียงจากข้อมูลอ้างอิง นอกนั้น 'fast'"""
     t = re.sub(r"\s+", "", text or "")
+    if (not has_context and len(t) < SMART_MIN_CHARS
+            and re.match(r"^(?:ช่วย)?(?:เปิด|ปิด|ยกเลิก|ตั้งเตือน|เตือน|ลบเตือน|ลบการเตือน)", t)):
+        return "fast"          # คำสั่งเครื่องสั้น ๆ ไม่ต้องคิดลึก (กันคำอย่าง "ลบ" "แปล" ดันไป smart)
     if has_context or len(t) >= SMART_MIN_CHARS or re.search(COMPLEX_CUES, t):
         return "smart"
     return "fast"
@@ -304,9 +338,9 @@ def ask(text, history=None, context=None, tier="fast"):
     history = [(ผู้ใช้พูด, ราฟาเอลตอบ), ...] ย้อนหลัง   context = [ข้อความอ้างอิง, ...] สำหรับตอบจากฐานความรู้
     tier = "fast" | "smart" (ดู choose_tier)"""
     if not _providers():
-        return dict(UNKNOWN)
+        return {**UNKNOWN, "llm_failed": True}
     searchable = live_search_available()
-    live_rule = ('\n5. ถ้าคำถามต้องการข้อมูลล่าสุดหรือปัจจุบัน (ตำแหน่งปัจจุบันของใคร ราคา ข่าว ผลการแข่งขัน '
+    live_rule = ('\n6. ถ้าคำถามต้องการข้อมูลล่าสุดหรือปัจจุบัน (ตำแหน่งปัจจุบันของใคร ราคา ข่าว ผลการแข่งขัน '
                  'สภาพอากาศ) ให้ intent = "live_search" และ query = คำถามเต็ม ห้ามตอบเอง ระบบจะค้นข้อมูลสดให้'
                  if searchable else "")
     system = SYSTEM_PROMPT.format(
@@ -317,7 +351,7 @@ def ask(text, history=None, context=None, tier="fast"):
         live_rule=live_rule,
         app_catalog=_app_catalog(),
     )
-    return _run_chain(system, text, _parse, tuple(history or ()), tier) or dict(UNKNOWN)
+    return _run_chain(system, text, _parse, tuple(history or ()), tier) or {**UNKNOWN, "llm_failed": True}
 
 
 # ---------------------------------------------------------------------
@@ -370,8 +404,8 @@ def _clean_for_speech(text):
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > LIVE_ANSWER_MAX_CHARS:
         cut = text[:LIVE_ANSWER_MAX_CHARS]
-        idx = max(cut.rfind("ค่ะ"), cut.rfind("คะ"), cut.rfind("."))
-        text = cut[:idx + 2] if idx > LIVE_ANSWER_MAX_CHARS * 0.5 else cut.rsplit(" ", 1)[0]
+        idx, n = max((cut.rfind(t), len(t)) for t in ("ค่ะ", "คะ", "."))   # n = ความยาวคำลงท้ายจริง
+        text = cut[:idx + n] if idx > LIVE_ANSWER_MAX_CHARS * 0.5 else cut.rsplit(" ", 1)[0]
     return text.strip()
 
 
@@ -420,7 +454,7 @@ def search_answer(question, history=None):
             print(f"🌐 [gemini-search:{model}] {time.time() - started:.1f}s (วันนี้ค้นไปแล้ว {used}/{LIVE_SEARCH_DAILY_LIMIT})")
             return text
         except Exception as e:
-            secs, why = _cooldown_seconds(str(e), getattr(e, "retry_after", None))
+            secs, why = _cooldown_seconds(str(e), getattr(e, "retry_after", None), _status_of(e))
             _cooldown[key] = time.time() + secs
             print(f"⚠️ gemini-search:{model} {why} (พัก {int(secs)} วินาที): {str(e)[:100]}")
     return None
