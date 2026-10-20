@@ -128,6 +128,16 @@ def resolve(name):
 
 
 def open_app(name):
+    query_lower = name.lower().strip()
+    
+    # ทางลัดเปิด Edge
+    if "edge" in query_lower or "เอจ" in query_lower:
+        try:
+            os.system("start msedge")
+            return True, "Microsoft Edge"
+        except Exception as e:
+            return False, str(e)
+        
     found = resolve(name)
     if not found:
         return False, 'ไม่พบโปรแกรมหรือพบชื่อที่ไม่ชัดเจน'
@@ -140,6 +150,16 @@ def open_app(name):
 
 
 def close_app(name):
+    query_lower = name.lower().strip()
+    
+    # ทางลัดสั่งปิด msedge.exe ตรงๆ
+    if "edge" in query_lower or "เอจ" in query_lower:
+        try:
+            os.system("taskkill /f /im msedge.exe >nul 2>&1")
+            return True, "Microsoft Edge"
+        except Exception as e:
+            return False, str(e)
+        
     """Gracefully close uniquely matched titled window; never kill Windows shell/processes."""
     key = canonical(name)
     if not key or key == 'file explorer':
