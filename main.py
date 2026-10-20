@@ -1,4 +1,9 @@
 import ctypes
+import os
+import json
+import threading
+import time
+import sys
 import Component.translator
 
 # ต้องตั้ง DPI awareness ก่อน import อย่างอื่น ไม่เช่นนั้นพิกัดการจับภาพกับพิกัดเมาส์จะไม่ตรงกัน
@@ -12,6 +17,43 @@ from ad_skipper import start_auto_skip_ads, stop_auto_skip_ads
 from reminder import start_reminder_system, stop_reminder_system, pop_due, handle_due
 from assistant import find_wake_word, strip_wake_words, interpret, handle_command
 from Component.widget import start_widget_thread, set_widget_state
+
+
+# --- จุดแก้ไข 2: ลบ import _config_data ที่เป็นปัญหาออก ---
+# ลบ: from config import _config_data
+# ลบ: telegram_token = _config_data.get("telegram_bot_token", "")
+# --------------------------------------------------------
+
+# --- จุดแก้ไข 3: ตรวจสอบการ import Component/tele_bot.py ---
+try:
+    from Component.tele_bot import start_telegram_bot_thread
+except ImportError:
+    print("⚠️ ไม่พบไฟล์ Component/tele_bot.py กรุณาสร้างไฟล์นี้ก่อนรันโปรแกรม")
+    sys.exit(1)
+# ------------------------------------------------------------
+
+# --- เพิ่มใหม่: ฟังก์ชันสำหรับโหลด Config จาก config.json โดยตรง ---
+def load_config():
+    """โหลดข้อมูลจาก config.json โดยตรง"""
+    default_config = {
+        "assistant_name": "raphael",
+        "stt_engine": "groq",
+        "telegram_bot_token": ""
+    }
+    
+    if os.path.exists("config.json"):
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"⚠️ อ่าน config.json ไม่สำเร็จ: {e}")
+            return default_config
+    else:
+        # ถ้าไม่มีไฟล์ ให้สร้าง default ขึ้นมา
+        with open("config.json", "w", encoding="utf-8") as f:
+            json.dump(default_config, f, indent=4)
+        return default_config
+# -------------------------------------------------------------
 
 def run_command(text):
     """วิเคราะห์และสั่งงาน คืน True ถ้าผู้ใช้สั่งปิดระบบ"""
@@ -37,10 +79,25 @@ def run_command(text):
 def main():
     start_widget_thread()
     set_widget_state("speaking")
+    config_data = load_config()
     speak("มีอะไรให้ ราฟาเอล ช่วยคะ")
     start_auto_skip_ads()
     start_reminder_system()
     set_widget_state("hidden")
+
+    # --- [จุดแก้ไข 4: โหลดและสั่งรัน Telegram Bot จากที่นี่] ---
+    # ดึง Token จาก Config ที่โหลดมาแล้ว
+    telegram_token = config_data.get("telegram_bot_token", "")
+    
+    if telegram_token and telegram_token.strip() != "":
+        print("📱 [System] เริ่มต้นระบบ Telegram Bot สแตนด์บายรับคำสั่งจากมือถือแล้วค่ะ")
+        # สั่งรันบอทใน background thread
+        start_telegram_bot_thread(telegram_token)
+    else:
+        print("⚠️ [System] แจ้งเตือน: ไม่พบ Telegram Bot Token หรือยังไม่ได้ใส่ Token จริงใน config.json")
+        print("   -> ระบบสั่งงานผ่านมือถือจะไม่ทำงาน (ถ้าต้องการใช้ ให้ใส่ Token ใน config.json แล้วรันใหม่)")
+    # --------------------------------------------------------
+    
     try:
         while True:
             try:

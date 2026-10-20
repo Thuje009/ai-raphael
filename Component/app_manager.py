@@ -159,7 +159,6 @@ def close_app(name):
             return True, "Microsoft Edge"
         except Exception as e:
             return False, str(e)
-        
     """Gracefully close uniquely matched titled window; never kill Windows shell/processes."""
     key = canonical(name)
     if not key or key == 'file explorer':
