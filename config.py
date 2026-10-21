@@ -126,3 +126,5 @@ LIVE_SEARCH_TIMEOUT_SEC = 20
 LIVE_SEARCH_DAILY_LIMIT = 100
 LIVE_ANSWER_MAX_CHARS = 450          # ตัดคำตอบที่ยาวเกินไปก่อนอ่านออกเสียง
 LIVE_SEARCH_USAGE_FILE = os.path.join(BASE_DIR, "live_search_usage.json")
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")

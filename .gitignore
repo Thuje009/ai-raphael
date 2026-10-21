@@ -1,14 +1,24 @@
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# secrets / ข้อมูลส่วนตัว
+.env
+config.json
+chrome_profile/
+ig_debug.html
+ig_debug.png
+
+# ไฟล์ที่โปรแกรมสร้างตอนรัน
 temp_audio.wav
 reply.mp3
-player_region.json
-.env
 tts_cache/
+player_region.json
 knowledge_cache.json
 unknown_commands.json
 my_notes.txt
 reminders.json
-reminders.json.bad
-reminders.json.tmp
+reminders.json.*
 live_search_usage.json
+*.log

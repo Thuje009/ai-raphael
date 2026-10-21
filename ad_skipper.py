@@ -172,14 +172,12 @@ def auto_skip_ads_loop():
                         phys_x = left + best_loc[0] + tw // 2
                         phys_y = top + best_loc[1] + th // 2
                         
-                        # 2. แปลงพิกัดตามสเกลจอบน Windows (อัตราส่วน 3456/1920 ≈ 1.25 หรือ 1.5 ตามจริง)
-                        # หากอยู่บนจอ 2 (X >= 1920) ให้แปลงสเกลเฉพาะส่วนของจอ 2
-                        if phys_x >= 1920:
-                            scale_x = 1536 / 1920 # อัตราส่วนความกว้าง Physical / Logical ของจอ 2
-                            scale_y = 864 / 1080  # อัตราส่วนความสูง Physical / Logical ของจอ 2
-                            
-                            cx = int(1920 + (phys_x - 1920) * scale_x) + CLICK_OFFSET_X
-                            cy = int(97 + (phys_y - 97) * scale_y) + CLICK_OFFSET_Y
+                        # 2. ปรับแก้สเกลสำหรับจอที่มีการขยาย (DPI Scaling 125% หรือ 1.25)
+                        # หากอยู่บนจอซ้าย (ค่า X ติดลบ หรืออยู่ในช่วงจอที่สอง) ให้หารด้วยสเกล 1.25
+                        if phys_x < 0:
+                            scale = 1
+                            cx = int(-1920 + (phys_x - (-1920)) / scale) + CLICK_OFFSET_X
+                            cy = int(0 + phys_y / scale) + CLICK_OFFSET_Y
                         else:
                             cx = phys_x + CLICK_OFFSET_X
                             cy = phys_y + CLICK_OFFSET_Y
@@ -190,7 +188,6 @@ def auto_skip_ads_loop():
                             pyautogui.click(cx, cy)
                             pyautogui.moveTo(old_pos)
                         last_click_time = now
-
 
                 skipper_stop.wait(AD_SCAN_INTERVAL_SEC)
             except Exception as e:
