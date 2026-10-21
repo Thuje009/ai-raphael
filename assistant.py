@@ -13,6 +13,7 @@ import Component.app_manager
 import Component.macro_manager
 import Component.translator
 import Component.pc_monitor
+import Component.note_search
 
 import pyautogui
 import pygetwindow as gw
@@ -35,6 +36,11 @@ from speech import speak, record_and_recognize
 music = {"queue": [], "index": -1}
 
 UNKNOWN = {"intent": "unknown", "query": ""}
+
+GROUNDED_SOURCES = ("file", "note_search")        # แหล่งที่ตอบจากข้อมูลของผู้ใช้ ห้าม cache
+LIVE_NOTE_MIN_SCORE = 0.25                        # คำถามข้อมูลสด (ราคา/ข่าว) ใช้โน้ตก็ต่อเมื่อตรงมาก ๆ
+LLM_DOWN_REPLY = "ระบบคิดขัดข้องชั่วคราวค่ะ ลองใหม่อีกครั้งนะคะ"
+QUESTION_CUES = r"(อะไร|เมื่อไหร่|เมื่อไร|ไหม|หรือเปล่า|หรือไม่|ที่ไหน|กี่|ยังไง|อย่างไร|ใคร)"
 
 # =====================================================================
 # Text & Wake Word Helpers
@@ -73,13 +79,13 @@ def music_query(text):
 def interpret_basic(text):
     # ลำดับของ if มีผล: อันที่เจอก่อนจะชนะ จึงเรียงกลุ่มตามความสำคัญ ไม่ใช่ตามตัวอักษร
     opening, closing = has_open(text), has_close(text)
-
+ 
     def result(intent, query=""):
         return {"intent": intent, "query": query}
-
+ 
     def toggle(base):
         return result(f"close_{base}" if closing and not opening else f"open_{base}")
-
+ 
     # =====================================================================
     # 1) สถานะเครื่อง
     # =====================================================================
@@ -88,20 +94,20 @@ def interpret_basic(text):
         "แรมเหลือ", "ซีพียู", "พื้นที่ว่าง", "ตรวจสอบเครื่อง", "เช็คสถานะ",
     ]):
         return result("pc_status")
-
+ 
     # =====================================================================
     # 2) ชุดคำสั่ง (Macro)
     # =====================================================================
     if has_any(text, ["เริ่มโหมด", "เปิดโหมด", "ชุดคำสั่ง"]):
         return result("run_macro", text)
-
+ 
     # =====================================================================
     # 3) ยกเลิกการปิดเครื่อง/รีสตาร์ท
     #    (ต้องอยู่ก่อนหมวด "ควบคุมเครื่อง" ไม่งั้นจะโดนจับเป็น shutdown)
     # =====================================================================
     if has_any(text, ["ยกเลิกปิดเครื่อง", "ยกเลิกการปิดเครื่อง", "ยกเลิกรีสตาร์ท", "ยกเลิกการรีสตาร์ท"]):
         return result("cancel_shutdown")
-
+ 
     # =====================================================================
     # 4) การเตือน (Reminder)
     #    (ต้องอยู่ก่อนหมวดอื่น เพราะ "เตือนให้ปิดเครื่อง" ต้องเป็นการตั้งเตือน ไม่ใช่ปิดเครื่องจริง)
@@ -112,13 +118,13 @@ def interpret_basic(text):
         return result("list_reminders")
     if re.search(r"(?<!คำ)เตือน(?!ภัย)", text):
         return result("set_reminder", text)
-
+ 
     # =====================================================================
     # 5) แปลภาษา
     # =====================================================================
     if has_any(text, ["แปลภาษา", "แปลตรงนี้", "แปลข้อความ", "แปลให้หน่อย", "แปลว่าอะไร"]):
         return result("translate_text")
-
+ 
     # =====================================================================
     # 6) โน้ต / บันทึก
     # =====================================================================
@@ -126,16 +132,18 @@ def interpret_basic(text):
         "เปิดโน้ต", "เปิดสมุดโน้ต", "ดูโน้ต", "อ่านโน้ต", "โน้ตที่บันทึก", "บันทึกเมื่อกี้",
     ]):
         return result("read_notes")
-    # คำว่า "บันทึก" ตัวเดี่ยวครอบคลุมทุกคำในลิสต์นี้แล้ว (ใส่ไว้เพื่ออ่านง่าย)
-    if has_any(text, [
-        "บันทึกลงไฟล์", "บันทึกใส่ไฟล์", "จดลงไฟล์", "สร้างโน้ต", "จดโน้ต",
-        "บันทึกข้อมูล", "บันทึกโน้ต", "บันทึกข้อความ", "บันทึก",
-    ]):
+    # คำที่ชัดเจนว่าสั่งจด -> จดเสมอ / คำกว้างอย่าง "บันทึก" -> จดเฉพาะเมื่อไม่ใช่คำถาม
+    # (กัน "ที่บันทึกไว้เรื่องนัดหมอคืออะไร" ถูกเซฟเป็นโน้ตใหม่แทนที่จะไปค้นโน้ต)
+    explicit_save = has_any(text, [
+        "บันทึกลงไฟล์", "บันทึกใส่ไฟล์", "จดลงไฟล์", "สร้างโน้ต", "จดโน้ต", "บันทึกโน้ต",
+    ])
+    loose_save = has_any(text, ["บันทึกข้อมูล", "บันทึกข้อความ", "บันทึก"]) and not re.search(QUESTION_CUES, text)
+    if explicit_save or loose_save:
         return result("save_note", Component.time_reminder.strip_phrases(text, [
             "บันทึกลงไฟล์", "บันทึกใส่ไฟล์", "จดลงไฟล์", "สร้างโน้ต", "จดโน้ต",
             "บันทึกข้อมูล", "บันทึกโน้ต", "ให้หน่อย", "หน่อย",
         ]))
-
+ 
     # =====================================================================
     # 7) วันที่ / เวลา
     # =====================================================================
@@ -149,7 +157,7 @@ def interpret_basic(text):
         return result("get_date", str(offset))
     if has_any(text, ["กี่โมง", "เวลาเท่าไร", "เวลาเท่าไหร่"]):
         return result("get_time")
-
+ 
     # =====================================================================
     # 8) เพลง
     # =====================================================================
@@ -161,7 +169,7 @@ def interpret_basic(text):
         return result("next_music")
     if has_any(text, ["เพลงก่อนหน้า", "ย้อนเพลง", "เพลงที่แล้ว"]):
         return result("prev_music")
-
+ 
     # =====================================================================
     # 9) ระดับเสียง
     # =====================================================================
@@ -171,7 +179,7 @@ def interpret_basic(text):
         return result("volume_down")
     if has_any(text, ["ปิดเสียง", "เปิดเสียง"]):
         return result("mute_audio")
-
+ 
     # =====================================================================
     # 10) ควบคุมเครื่อง (ระบบ)
     # =====================================================================
@@ -185,13 +193,31 @@ def interpret_basic(text):
         return result("lock_screen")
     if has_any(text, ["สแกนไวรัส", "ตรวจไวรัส", "หาไฟล์อันตราย", "เช็กไวรัส", "สแกนเครื่อง"]):
         return result("scan_virus")
-
+    
+    
+     # --- git: สั่งได้เฉพาะ keyword เท่านั้น (ไม่อยู่ใน INTENTS ของ LLM กันโมเดลสั่งเอง) ---
+    # STT ฟังคำอังกฤษเพี้ยนบ่อย (commit -> comic) จึงมี 2 ระดับ:
+    #   คำชัด -> จับได้เลย / คำที่ฟังเพี้ยน -> ต้องมีคำว่า code/โค้ด/git อยู่ด้วยถึงจะนับ (กัน "comic" จริง ๆ)
+    low = text.lower()
+    code_words = has_any(low, ["code", "โค้ด", "โค๊ด", "โค๊ต", "โค้ต", "โคด", "git", "กิต", "โปรเจกต์", "โปรเจค"])
+    commit_hit = has_any(low, ["commit", "คอมมิต", "คอมมิท", "คอมมิ๊ต"]) or (
+        code_words and has_any(low, ["comit", "commet", "comet", "comic", "คอมมิก", "คอมมิค", "คอมมิด", "โคมิต"]))
+    push_hit = has_any(low, ["push", "พุช", "พุด", "ปุช"])
+    if commit_hit and push_hit:
+        return result("git_commit_push", text)
+    if commit_hit:
+        return result("git_commit", text)
+    if push_hit:
+        return result("git_push", text)
+    if has_any(low, ["git status", "สถานะ git", "สถานะโค้ด"]):
+        return result("git_status", text)
+ 
     # =====================================================================
     # 11) ควบคุมราฟาเอล (ปิดโปรแกรมตัวเอง)
     # =====================================================================
     if has_any(text, ["หยุดการทำงาน", "ออกจากโปรแกรม"]) or re.search(r"(?<!เ)ปิดระบบ", text):
         return result("exit_system")
-
+ 
     # =====================================================================
     # 12) ควบคุมหน้าต่าง
     #     "ปิดหน้าต่างอื่น..." ต้องเช็กก่อน "ปิดหน้าต่าง" เฉย ๆ
@@ -201,7 +227,7 @@ def interpret_basic(text):
         return result("close_other_windows", text)
     if re.search(r"(?<!เ)ปิด(หน้าต่าง|โปรแกรมนี้)", text):
         return result("close_window")
-
+ 
     # =====================================================================
     # 13) เปิด/ปิดโปรแกรมที่กำหนดไว้
     # =====================================================================
@@ -219,14 +245,14 @@ def interpret_basic(text):
         return toggle("settings")
     if has_any(text, ["control panel", "คอนโทรลพาเนล", "แผงควบคุม"]):
         return toggle("control_panel")
-
+ 
     # =====================================================================
     # 14) ค้นหาข้อมูลออนไลน์
     # =====================================================================
     m = re.match(r"^\s*(?:ช่วย)?(?:ค้นหา|ค้นข้อมูล|ค้นให้|สืบค้น|เสิร์ช|search)\s*(?:ข้อมูล)?\s*(?:เกี่ยวกับ|เรื่อง)?", text)
     if m:
         return result("live_search", text[m.end():].strip() or text)
-
+ 
     # =====================================================================
     # 15) โปรแกรมทั่วไป (ตัวสุดท้าย: จับ "เปิด/ปิด <ชื่อโปรแกรมอะไรก็ได้>")
     #     ต้องอยู่ท้ายสุดเสมอ เพราะกฎด้านบนเฉพาะเจาะจงกว่า
@@ -236,9 +262,9 @@ def interpret_basic(text):
         target = m.group(2).strip()
         if target:
             return result("open_app" if m.group(1) == "เปิด" else "close_app", target)
-
+ 
     return dict(UNKNOWN)
-
+ 
 
 SEARCH_FAIL_REPLY = "รายงานค่ะ ดิฉันค้นข้อมูลสดไม่สำเร็จในตอนนี้ ลองใหม่อีกครั้งภายหลังนะคะ"
 SEARCH_OFF_REPLY = "รายงานค่ะ ตอนนี้ดิฉันค้นข้อมูลสดไม่ได้ อาจยังไม่ได้ตั้งค่า หรือใช้โควต้าของวันนี้ครบแล้วค่ะ"
@@ -258,38 +284,52 @@ def interpret(text):
     if basic["intent"] == "live_search":
         return (_search_reply(basic["query"], conversation.recent(), original=text) or _answered(text, SEARCH_FAIL_REPLY if llm.live_search_available() else SEARCH_OFF_REPLY))
     if basic["intent"] != "unknown": return basic
-
+ 
     reply = knowledge.rule_answer(text)
     if reply: return _answered(text, reply)
-
+ 
     history = conversation.recent()
     followup = conversation.is_followup(text)
     context, source, raw_fallback = None, None, None
-
+ 
     if not followup:
-        cached = knowledge.cache_answer(text)
-        if cached: return _answered(text, cached)
-        chunks = knowledge.retrieve(text)
-        if chunks:
-            context, source = [c for c, _s in chunks], "file"
-            if chunks[0][1] >= FILE_MATCH_THRESHOLD: raw_fallback = knowledge.shorten(chunks[0][0])
-        elif knowledge.looks_factual(text) and not knowledge.needs_live_data(text):
-            wiki = knowledge.wiki_answer(text)
-            if wiki: context, source, raw_fallback = [wiki], "wiki", wiki
-
-    if source != "file" and knowledge.needs_live_data(text):
+        # 1. โน้ตส่วนตัวก่อนเสมอ (ก่อน cache เพื่อไม่ให้คำตอบเก่าที่ cache ไว้ บังโน้ตที่เพิ่งจดใหม่)
+        #    ถ้าเป็นคำถามข้อมูลสด ใช้เกณฑ์เข้มขึ้น กันโน้ตที่แค่คำบังเอิญตรงมาแทนการค้นสด
+        min_score = LIVE_NOTE_MIN_SCORE if knowledge.needs_live_data(text) else Component.note_search.MIN_SCORE
+        note_chunks = Component.note_search.search(text, min_score=min_score)
+        if note_chunks:
+            context, source = note_chunks, "note_search"
+        else:
+            # 2. ไม่เจอในโน้ต -> cache -> ไฟล์ knowledge/ -> wiki
+            cached = knowledge.cache_answer(text)
+            if cached: return _answered(text, cached)
+ 
+            chunks = knowledge.retrieve(text)
+            if chunks:
+                context, source = [c for c, _s in chunks], "file"
+                if chunks[0][1] >= FILE_MATCH_THRESHOLD: raw_fallback = knowledge.shorten(chunks[0][0])
+            elif knowledge.looks_factual(text) and not knowledge.needs_live_data(text):
+                wiki = knowledge.wiki_answer(text)
+                if wiki: context, source, raw_fallback = [wiki], "wiki", wiki
+ 
+    if source not in GROUNDED_SOURCES and knowledge.needs_live_data(text):
         found = _search_reply(text, history)
         if found: return found
         return _answered(text, knowledge.LIVE_DATA_REPLY)
-
+ 
     if not llm.llm_available():
         return _answered(text, raw_fallback) if raw_fallback else dict(UNKNOWN)
-
+ 
     data = llm.ask(text, history=history, context=context, tier=llm.choose_tier(text, bool(context)))
+ 
+    # ทุกโมเดลล้ม (เน็ต/โควตา) ไม่ใช่ "ไม่เข้าใจ" -> ใช้ข้อความจากไฟล์ถ้ามี ไม่งั้นแจ้งว่าระบบขัดข้อง
+    if data.get("llm_failed"):
+        return _answered(text, raw_fallback or LLM_DOWN_REPLY)
+ 
     if data["intent"] == "live_search":
         return (_search_reply(data.get("query") or text, history, original=text) or _answered(text, knowledge.LIVE_DATA_REPLY))
     if data["intent"] == "answer":
-        if source == "file" or followup: data["cacheable"] = False
+        if source in GROUNDED_SOURCES or followup: data["cacheable"] = False
         if data.get("cacheable"): knowledge.remember(text, data["answer"])
         conversation.add(text, data["answer"])
     elif data["intent"] == "unknown" and raw_fallback:
@@ -483,6 +523,12 @@ COMMANDS = {
         lambda: os.system("shutdown /a >nul 2>&1"),
     ),
 
+    # --- git (ถามยืนยันภายในฟังก์ชันเอง) ---
+    "git_status": lambda q: Component.system_control.cmd_status(q),
+    "git_commit": lambda q: Component.system_control.cmd_commit(q, confirm),
+    "git_push": lambda q: Component.system_control.cmd_push(q, confirm),
+    "git_commit_push": lambda q: Component.system_control.cmd_commit_push(q, confirm),
+
     # =====================================================================
     # 9) ตรวจสอบเครื่อง / ความปลอดภัย
     # =====================================================================
@@ -495,7 +541,6 @@ COMMANDS = {
     "run_macro": lambda q: Component.macro_manager.run_macro(q),
     "translate_text": lambda _q: Component.translator.translate_selected_text(),
 }
-
 def handle_command(intent_data, raw_text=""):
     if not isinstance(intent_data, dict):
         intent_data = UNKNOWN

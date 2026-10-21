@@ -1,0 +1,33 @@
+# Git Command & Workflow Guide for Raphael
+
+## 1. การจัดการ Branch และ Commit (Branch & Commit Management)
+- สร้างและสลับไปยัง Branch ใหม่:
+  git checkout -b <branch_name>  (หรือใช้ git switch -c <branch_name>)
+- สลับไป Branch อื่น:
+  git checkout <branch_name>  (หรือใช้ git switch <branch_name>)
+- ตรวจสอบรายชื่อ Branch ทั้งหมด:
+  git branch -a
+- บันทึกการเปลี่ยนแปลง (Commit):
+  1. git add .  (เลือกไฟล์ทั้งหมดเข้า staging area)
+  2. git commit -m "ข้อความอธิบายการเปลี่ยนแปลง"
+
+## 2. การแก้ปัญหา Merge Conflict และ Rebase
+- วิธีแก้ Merge Conflict เมื่อโค้ดชนกัน:
+  1. เปิดไฟล์ที่มีปัญหา สังเกตเครื่องหมาย <<<<<<<, =======, >>>>>>>
+  2. ลบเครื่องหมายและเลือกโค้ดที่ต้องการเก็บไว้
+  3. บันทึกไฟล์ จากนั้นรันคำสั่ง: git add <ชื่อไฟล์>
+  4. ทำต่อให้เสร็จด้วย: git commit -m "Resolved merge conflict" หรือ git rebase --continue
+- การใช้ Rebase เพื่อจัดระเบียบ Commit:
+  - สลับมาที่ branch ของเรา แล้วรัน: git rebase main (เพื่อนำ commit ของเราไปต่อท้าย main ล่าสุด ทำให้ประวัติสะอาดไม่เป็นกิ่งก้านรก)
+  - ถ้ายกเลิก Rebase กลางคัน: git rebase --abort
+
+## 3. การตั้งค่า Remote และการ Push / Pull
+- เชื่อมต่อโปรเจกต์กับ GitHub Remote Repository (ทำครั้งแรก):
+  git remote add origin <repository_url>
+- ดึงโค้ดล่าสุดจาก Remote มาอัปเดตเครื่องเรา (Pull):
+  git pull origin <branch_name>
+- ส่งโค้ดขึ้น GitHub (Push):
+  - ครั้งแรก: git push -u origin <branch_name>
+  - ครั้งถัดไป: git push
+- บังคับอัปเดตทับโค้ดบน Remote (ใช้ด้วยความระมัดระวัง):
+  git push origin <branch_name> --force

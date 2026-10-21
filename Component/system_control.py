@@ -1,6 +1,10 @@
-"""ระบบควบคุมหน้าต่างและระบบคอมพิวเตอร์ของราฟาเอล"""
+"""ระบบควบคุมหน้าต่าง สแกนไวรัส และ git ของราฟาเอล"""
+import json
+import os
+import re
 import subprocess
 import threading
+from datetime import datetime
 
 import pygetwindow as gw
 
@@ -13,10 +17,13 @@ try:
 except ImportError:
     win32gui = None
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(_HERE) if os.path.basename(_HERE).lower() == "component" else _HERE
+CONFIG_PATH = os.path.join(ROOT, "config.json")
+
 # ---------------------------------------------------------------------------
 # หน้าต่าง
 # ---------------------------------------------------------------------------
-
 # หน้าต่างที่ห้ามปิดเด็ดขาด (เทียบแบบ lowercase ว่า "มีคำนี้อยู่ใน title")
 # หมายเหตุ: Chrome ที่เปิด debug port 9222 ไว้ให้ IG bot ก็ควรอยู่ในรายการนี้
 PROTECTED_TITLES = [
@@ -85,7 +92,6 @@ def close_other_windows(confirmed=True):
     print(f"🧹 ปิดหน้าต่างอื่นไป {count} หน้าต่าง")
     return count
 
-
 # ---------------------------------------------------------------------------
 # สแกนไวรัส
 # ---------------------------------------------------------------------------
@@ -137,3 +143,214 @@ def scan_virus_in_background():
     _scan_running.set()
     speak("รับทราบค่ะ กำลังสแกนไวรัสในเบื้องหลัง ระหว่างนี้ใช้งานต่อได้ปกติ เสร็จแล้วจะรายงานผลให้ค่ะ")
     threading.Thread(target=_background_scan_and_report, daemon=True, name="Raphael-Scan").start()
+
+
+# ---------------------------------------------------------------------------
+# git
+# ---------------------------------------------------------------------------
+GIT_TIMEOUT = 60
+
+# ไฟล์ที่ห้าม commit อัตโนมัติ ถ้าเจอใน git status (คือไม่ถูก .gitignore กัน) ให้หยุดและบอกผู้ใช้
+SENSITIVE = re.compile(
+    r"(^|/)(\.env[^/]*|config\.json|id_rsa[^/]*|[^/]*\.(pem|key|p12|pfx)|[^/]*(token|secret|password)[^/]*)$",
+    re.IGNORECASE,
+)
+
+
+def _git(args, cwd, timeout=GIT_TIMEOUT):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")      # ห้ามรอถามรหัสผ่าน (ไม่งั้นค้าง)
+    return subprocess.run(
+        ["git", "-c", "core.quotepath=false"] + args,
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=timeout, env=env,
+    )
+ 
+ 
+def _config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+ 
+ 
+def _is_repo(path):
+    try:
+        return os.path.isdir(path) and _git(["rev-parse", "--is-inside-work-tree"], path, 10).returncode == 0
+    except Exception:
+        return False
+ 
+ 
+def resolve_project(text=""):
+    """คืน (ชื่อ, path) หรือ (None, None)"""
+    cfg = _config()
+    projects = {k: v for k, v in (cfg.get("projects") or {}).items() if v}
+    low = (text or "").lower()
+ 
+    for name, path in projects.items():                       # 1) พูดชื่อมา
+        if name.lower() in low:
+            return name, path
+ 
+    if projects:                                       # 2) VS Code ที่เปิดอยู่
+        try:
+            win = gw.getActiveWindow()
+            title = (win.title or "") if win else ""
+        except Exception:
+            title = ""
+        if "visual studio code" in title.lower():
+            parts = [p.strip().lower() for p in title.split(" - ")]
+            for name, path in projects.items():
+                if os.path.basename(path.rstrip("\\/")).lower() in parts or name.lower() in parts:
+                    return name, path
+ 
+    default = cfg.get("default_project")                      # 3) ค่าเริ่มต้น
+    if default in projects:
+        return default, projects[default]
+    return os.path.basename(ROOT), ROOT                       # 4) ราฟาเอลเอง
+ 
+ 
+def _changes(cwd):
+    """คืนรายชื่อไฟล์ที่เปลี่ยน/ใหม่ (ไม่รวมไฟล์ที่ .gitignore กัน)"""
+    out = _git(["status", "--porcelain", "-uall"], cwd).stdout
+    files = []
+    for line in out.splitlines():
+        path = line[3:].strip().strip('"')
+        if " -> " in path:                                    # rename
+            path = path.split(" -> ")[-1]
+        files.append(path)
+    return files
+ 
+ 
+def _say(msg):
+    print(f"🔧 [git] {msg}")
+    speak(msg)
+    return msg
+ 
+ 
+def _prepare(text):
+    name, path = resolve_project(text)
+    if not _is_repo(path):
+        _say(f"โฟลเดอร์ {name} ยังไม่ใช่โปรเจกต์ git หรือหาไม่เจอค่ะ ตรวจ projects ใน config.json นะคะ")
+        return None, None
+    return name, path
+ 
+ 
+# ---------------------------------------------------------------------
+# คำสั่ง
+# ---------------------------------------------------------------------
+def cmd_status(text=""):
+    name, path = _prepare(text)
+    if not path:
+        return
+    try:
+        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], path).stdout.strip() or "ไม่ทราบ"
+        n = len(_changes(path))
+        ahead = _git(["rev-list", "--count", "@{u}..HEAD"], path)
+        ahead_n = int(ahead.stdout.strip()) if ahead.returncode == 0 and ahead.stdout.strip().isdigit() else None
+    except subprocess.TimeoutExpired:
+        return _say("git ตอบช้าเกินไปค่ะ ลองใหม่อีกครั้งนะคะ")
+ 
+    msg = f"โปรเจกต์ {name} อยู่ที่ branch {branch} "
+    msg += f"มีไฟล์เปลี่ยน {n} ไฟล์ค่ะ" if n else "ไม่มีไฟล์ที่ยังไม่ commit ค่ะ"
+    if ahead_n:
+        msg += f" และมี {ahead_n} commit ที่ยังไม่ได้ push"
+    _say(msg)
+ 
+ 
+def _message_from(text, n_files):
+    m = re.search(r"(?:ข้อความ|ว่า|message)\s*(.+)$", text or "", re.IGNORECASE)
+    if m and m.group(1).strip():
+        return m.group(1).strip()[:100]
+    return f"update: {n_files} files ({datetime.now():%Y-%m-%d %H:%M})"
+ 
+ 
+def _do_commit(text="", confirm=None, quiet=False):
+    """commit ทุกไฟล์ที่เปลี่ยน (ไม่ push) คืน True ถ้า commit สำเร็จ"""
+    name, path = _prepare(text)
+    if not path:
+        return False
+    try:
+        files = _changes(path)
+        if not files:
+            _say(f"โปรเจกต์ {name} ไม่มีไฟล์เปลี่ยนแปลงให้ commit ค่ะ")
+            return False
+ 
+        risky = [f for f in files if SENSITIVE.search(f.replace("\\", "/"))]
+        if risky:
+            _say(f"หยุดก่อนค่ะ พบไฟล์ที่อาจเป็นความลับ {', '.join(os.path.basename(r) for r in risky[:3])} "
+                 "ที่ยังไม่ได้ใส่ใน gitignore ไม่ commit ให้ ตรวจแล้วสั่งใหม่นะคะ")
+            return False
+ 
+        message = _message_from(text, len(files))
+        if confirm and not confirm(f"โปรเจกต์ {name} มี {len(files)} ไฟล์เปลี่ยน จะ commit ด้วยข้อความ {message} ใช่ไหมคะ"):
+            _say("ยกเลิกการ commit ค่ะ")
+            return False
+ 
+        add = _git(["add", "-A"], path)
+        if add.returncode != 0:
+            _say("เพิ่มไฟล์เข้า git ไม่สำเร็จค่ะ ดูรายละเอียดในหน้าจอ")
+            print(add.stderr)
+            return False
+ 
+        res = _git(["commit", "-m", message], path)
+        if res.returncode != 0:
+            err = (res.stderr + res.stdout).lower()
+            print(res.stderr or res.stdout)
+            if "user.name" in err or "user.email" in err or "tell me who you are" in err:
+                _say("git ยังไม่ได้ตั้งชื่อและอีเมลผู้ใช้ค่ะ ต้องตั้ง user.name กับ user.email ก่อน")
+            else:
+                _say("commit ไม่สำเร็จค่ะ ดูรายละเอียดในหน้าจอ")
+            return False
+ 
+        if not quiet:
+            _say(f"commit โปรเจกต์ {name} เรียบร้อยแล้วค่ะ {len(files)} ไฟล์")
+        return True
+    except subprocess.TimeoutExpired:
+        _say("git ตอบช้าเกินไปค่ะ ลองใหม่อีกครั้งนะคะ")
+        return False
+ 
+ 
+def _do_push(text="", confirm=None):
+    name, path = _prepare(text)
+    if not path:
+        return False
+    try:
+        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], path).stdout.strip()
+        if confirm and not confirm(f"จะ push โปรเจกต์ {name} branch {branch} ขึ้น GitHub ใช่ไหมคะ"):
+            _say("ยกเลิกการ push ค่ะ")
+            return False
+ 
+        res = _git(["push"], path)
+        if res.returncode == 0:
+            _say(f"push โปรเจกต์ {name} ขึ้น GitHub เรียบร้อยแล้วค่ะ")
+            return True
+ 
+        err = (res.stderr + res.stdout).lower()
+        print(res.stderr or res.stdout)
+        if "no upstream" in err or "set-upstream" in err:
+            _say("branch นี้ยังไม่เคยผูกกับ GitHub ค่ะ ต้องพิมพ์ git push -u origin เองครั้งแรก")
+        elif "rejected" in err or "non-fast-forward" in err or "fetch first" in err:
+            _say("GitHub ปฏิเสธค่ะ เพราะมีการเปลี่ยนแปลงฝั่งนั้นที่เรายังไม่มี ต้อง pull ก่อน")
+        elif "authentication" in err or "could not read" in err or "permission" in err or "403" in err:
+            _say("ยืนยันตัวตนกับ GitHub ไม่ผ่านค่ะ ตรวจ token หรือ credential ของ git")
+        else:
+            _say("push ไม่สำเร็จค่ะ ดูรายละเอียดในหน้าจอ")
+        return False
+    except subprocess.TimeoutExpired:
+        _say("push ใช้เวลานานเกินไปค่ะ ตรวจอินเทอร์เน็ตหรือ credential แล้วลองใหม่")
+        return False
+ 
+ 
+def cmd_commit(text="", confirm=None):
+    """commit ทุกไฟล์ที่เปลี่ยน (ไม่ push) ไม่คืนค่า เพื่อไม่ให้ตัวจัดการคำสั่งตีความว่า True = ปิดระบบ"""
+    _do_commit(text, confirm)
+
+
+def cmd_push(text="", confirm=None):
+    _do_push(text, confirm)
+
+
+def cmd_commit_push(text="", confirm=None):
+    """commit แล้ว push ต่อ (ถามยืนยันแยกกัน และไม่ push ถ้า commit ไม่สำเร็จ)"""
+    if _do_commit(text, confirm, quiet=True):
+        _do_push(text, confirm)
