@@ -194,15 +194,21 @@ def interpret_basic(text):
     if has_any(text, ["สแกนไวรัส", "ตรวจไวรัส", "หาไฟล์อันตราย", "เช็กไวรัส", "สแกนเครื่อง"]):
         return result("scan_virus")
     
-    
-     # --- git: สั่งได้เฉพาะ keyword เท่านั้น (ไม่อยู่ใน INTENTS ของ LLM กันโมเดลสั่งเอง) ---
+    # =====================================================================
+    # --- git: สั่งได้เฉพาะ keyword เท่านั้น (ไม่อยู่ใน INTENTS ของ LLM กันโมเดลสั่งเอง) ---
     # STT ฟังคำอังกฤษเพี้ยนบ่อย (commit -> comic) จึงมี 2 ระดับ:
     #   คำชัด -> จับได้เลย / คำที่ฟังเพี้ยน -> ต้องมีคำว่า code/โค้ด/git อยู่ด้วยถึงจะนับ (กัน "comic" จริง ๆ)
+    # =====================================================================
     low = text.lower()
-    code_words = has_any(low, ["code", "โค้ด", "โค๊ด", "โค๊ต", "โค้ต", "โคด", "git", "กิต", "โปรเจกต์", "โปรเจค"])
+    code_words = has_any(low, ["code", "โค้ด", "โค๊ด", "โค๊ต", "โค้ต", "โคด", "git", "กิต", "github", "กิตฮับ", "กิทฮับ",
+                               "โปรเจกต์", "โปรเจค"])
     commit_hit = has_any(low, ["commit", "คอมมิต", "คอมมิท", "คอมมิ๊ต"]) or (
         code_words and has_any(low, ["comit", "commet", "comet", "comic", "คอมมิก", "คอมมิค", "คอมมิด", "โคมิต"]))
-    push_hit = has_any(low, ["push", "พุช", "พุด", "ปุช"])
+    # push: คำชัด / วลีไทยที่ STT ฟังแม่น / คำที่ฟังเพี้ยน (พูด, food ฯลฯ) นับเมื่อมีบริบทโค้ดหรือ commit อยู่ด้วย
+    push_hit = (
+        has_any(low, ["push", "พุช", "พุด", "ปุช", "ขึ้น github", "ขึ้นกิตฮับ", "ขึ้นกิทฮับ", "อัปโหลดโค้ด", "อัพโหลดโค้ด", "ส่งโค้ดขึ้น"])
+        or ((code_words or commit_hit) and has_any(low, ["พูด", "food", "foot", "pooch", "bush", "put", "fush", "พุก", "ปูช"]))
+    )
     if commit_hit and push_hit:
         return result("git_commit_push", text)
     if commit_hit:
@@ -211,6 +217,7 @@ def interpret_basic(text):
         return result("git_push", text)
     if has_any(low, ["git status", "สถานะ git", "สถานะโค้ด"]):
         return result("git_status", text)
+ 
  
     # =====================================================================
     # 11) ควบคุมราฟาเอล (ปิดโปรแกรมตัวเอง)
