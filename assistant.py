@@ -23,6 +23,15 @@ try:
     import pyperclip      # pip install pyperclip (จำเป็นสำหรับพิมพ์ข้อความภาษาไทย)
 except ImportError:
     pyperclip = None
+    
+ 
+def _dev_context():
+    """กำลังอยู่ใน VS Code/terminal ไหม (ถ้าเช็กไม่ได้ ถือว่าไม่ใช่)"""
+    try:
+        return bool(Component.system_control.dev_window_active())
+    except Exception:
+        return False
+ 
 
 import conversation
 import knowledge
@@ -202,6 +211,13 @@ def interpret_basic(text):
     low = text.lower()
     code_words = has_any(low, ["code", "โค้ด", "โค๊ด", "โค๊ต", "โค้ต", "โคด", "git", "กิต", "github", "กิตฮับ", "กิทฮับ",
                                "โปรเจกต์", "โปรเจค"])
+    # branch: คำชัด + "สาขา" (คำไทยที่ STT ฟังแม่น) / คำที่ฟังเพี้ยน (แบรนด์, บ้าน ฯลฯ) นับเมื่อมีบริบทโค้ด
+    # หรือกำลังเปิด VS Code/terminal อยู่ (คำสั่งนี้ถามยืนยันก่อนสร้างเสมอ จึงปลอดภัยถ้าจับพลาด)
+    branch_hit = has_any(low, ["branch", "บรานช์", "แบรนช์", "แบรนซ์", "บรานซ์", "บราญช์",
+                               "สร้างสาขา", "แตกสาขา", "แยกสาขา", "สาขาใหม่"]) or (
+        (code_words or _dev_context()) and has_any(low, ["แบรนด์", "brand", "แบรน", "บราน", "บ้านใหม่", "สร้างบ้าน", "แยกบ้าน", "แตกบ้าน"]))
+    if branch_hit and has_any(low, ["สร้าง", "แยก", "แตก", "ใหม่", "new", "create"]):
+        return result("git_new_branch", text)
     commit_hit = has_any(low, ["commit", "คอมมิต", "คอมมิท", "คอมมิ๊ต"]) or (
         code_words and has_any(low, ["comit", "commet", "comet", "comic", "คอมมิก", "คอมมิค", "คอมมิด", "โคมิต"]))
     # push: คำชัด / วลีไทยที่ STT ฟังแม่น / คำที่ฟังเพี้ยน (พูด, food ฯลฯ) นับเมื่อมีบริบทโค้ดหรือ commit อยู่ด้วย
@@ -217,6 +233,7 @@ def interpret_basic(text):
         return result("git_push", text)
     if has_any(low, ["git status", "สถานะ git", "สถานะโค้ด"]):
         return result("git_status", text)
+ 
  
  
     # =====================================================================
@@ -535,6 +552,7 @@ COMMANDS = {
     "git_commit": lambda q: Component.system_control.cmd_commit(q, confirm),
     "git_push": lambda q: Component.system_control.cmd_push(q, confirm),
     "git_commit_push": lambda q: Component.system_control.cmd_commit_push(q, confirm),
+    "git_new_branch": lambda q: Component.system_control.cmd_new_branch(q, confirm),
 
     # =====================================================================
     # 9) ตรวจสอบเครื่อง / ความปลอดภัย
