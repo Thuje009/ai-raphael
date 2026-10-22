@@ -48,7 +48,7 @@ SPECIAL_INTENTS = {"live_search", "exit_system", "unknown", "answer"}
 NEED_CONFIRM = {"shutdown_pc", "restart_pc", "sleep_pc", "close_other_windows", "close_chrome"}
 
 # intent ที่สั่งได้เฉพาะ keyword (อยู่ใน COMMANDS แต่ตั้งใจไม่ให้ LLM ส่งเอง)
-KEYWORD_ONLY = {"git_status", "git_commit", "git_push", "git_commit_push"}
+KEYWORD_ONLY = {"git_status", "git_commit", "git_push", "git_commit_push", "git_new_branch"}
 
 
 def check_handlers(commands):
@@ -81,6 +81,10 @@ SYSTEM_PROMPT = """{persona}
    ข้อมูลที่เปลี่ยนได้ (ข่าว ราคา อากาศ ผลกีฬา ตำแหน่งปัจจุบัน) หรือคำตอบที่ใช้ประวัติการคุย ให้ false
 4. ถ้าเป็นคำถามแต่ไม่แน่ใจคำตอบ ให้ intent = "answer" แล้วตอบตรงๆ ใน answer ว่ายืนยันไม่ได้ ห้ามเดา
    ใช้ intent = "unknown" เฉพาะเมื่อข้อความไม่ใช่คำสั่งและฟังไม่เป็นประโยค (เสียงรบกวน คำที่ขาดหาย) และเว้น answer ว่าง
+   ชื่อเฉพาะที่ไม่รู้จัก (บ้าน โปรเจกต์ บุคคล สถานที่ ที่ผู้ใช้ตั้งเอง) ห้ามแต่งรายละเอียดเด็ดขาด ให้ตอบว่าไม่รู้จัก
+   ข้อความมาจากการถอดเสียง อาจผิดได้ ถ้าความหมายแปลกหรือไม่ปะติดปะต่อ (เช่น "สร้างบ้านใหม่" ในบริบทคุยกับผู้ช่วยคอมพิวเตอร์)
+   ให้ถามกลับสั้นๆ ว่าหมายถึงอะไร แทนการตอบเป็นเรื่องเป็นราว
+   ถ้าผู้ใช้สั่งให้ทำสิ่งที่ไม่มี intent ตรงกัน ให้ตอบสั้นๆ ว่ายังทำให้ไม่ได้ ไม่ต้องอธิบายเพิ่ม
 5. หากผู้ใช้สั่งงานหลายคำสั่งพร้อมกันในประโยคเดียว (และระบบยังรองรับทีละคำสั่ง) ให้กำหนด intent = "answer" 
    และตอบใน answer ตามบุคลิกเพื่อแจ้งผู้ใช้ เช่น "รายงานค่ะ ท่านสั่งงานหลายรายการพร้อมกัน ดิฉันยังรองรับได้ทีละคำสั่ง รบกวนสั่งทีละรายการนะคะ"
 
@@ -356,7 +360,13 @@ def ask(text, history=None, context=None, tier="fast"):
         live_rule=live_rule,
         app_catalog=_app_catalog(),
     )
-    return _run_chain(system, text, _parse, tuple(history or ()), tier) or {**UNKNOWN, "llm_failed": True}
+    data = _run_chain(system, text, _parse, tuple(history or ()), tier)
+    if not data:
+        return {**UNKNOWN, "llm_failed": True}
+    # ข้อความที่มีตัวเลข/รหัส (เช่น "เพจ 001") มักเป็นชื่อเฉพาะหรือคำสั่งที่ถอดเสียงผิด ไม่เก็บคำตอบลง cache
+    if re.search(r"\d", text or ""):
+        data["cacheable"] = False
+    return data
 
 
 # ---------------------------------------------------------------------

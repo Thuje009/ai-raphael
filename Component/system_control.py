@@ -39,6 +39,16 @@ EXPLORER_KEYWORDS = [
 ]
 
 
+def dev_window_active():
+    """True ถ้าหน้าต่างบนสุดคือ VS Code / terminal (ใช้ช่วยตีความคำสั่ง git ที่ STT ฟังเพี้ยน)"""
+    try:
+        w = gw.getActiveWindow()
+        title = ((w.title or "") if w else "").lower()
+    except Exception:
+        return False
+    return any(k in title for k in ("visual studio code", "cmd.exe", "powershell", "terminal", "raphael", "github"))
+
+
 def _is_explorer_window(w):
     """True ถ้าเป็นหน้าต่าง File Explorer / Control Panel จริง ๆ"""
     if win32gui is not None:
@@ -238,6 +248,24 @@ def _prepare(text):
 # ---------------------------------------------------------------------
 # คำสั่ง
 # ---------------------------------------------------------------------
+def _current_branch(path):
+    return _git(["rev-parse", "--abbrev-ref", "HEAD"], path).stdout.strip()
+
+
+def _protected_note(path):
+    """ถ้าอยู่บน branch หลัก (main/master หรือตาม protected_branches ใน config.json) ให้เตือนในคำถามยืนยัน"""
+    protected = _config().get("protected_branches") or ["main", "master"]
+    cur = _current_branch(path)
+    return f" (ตอนนี้อยู่บน {cur} ซึ่งเป็น branch หลัก)" if cur in protected else ""
+
+
+def _remote(path):
+    remotes = _git(["remote"], path).stdout.split()
+    if "origin" in remotes:
+        return "origin"
+    return remotes[0] if remotes else None
+
+
 def cmd_status(text=""):
     name, path = _prepare(text)
     if not path:
@@ -282,7 +310,7 @@ def _do_commit(text="", confirm=None, quiet=False):
             return False
  
         message = _message_from(text, len(files))
-        if confirm and not confirm(f"โปรเจกต์ {name} มี {len(files)} ไฟล์เปลี่ยน จะ commit ด้วยข้อความ {message} ใช่ไหมคะ"):
+        if confirm and not confirm(f"โปรเจกต์ {name} มี {len(files)} ไฟล์เปลี่ยน จะ commit ด้วยข้อความ {message} ใช่ไหมคะ" + _protected_note(path)):
             _say("ยกเลิกการ commit ค่ะ")
             return False
  
@@ -315,12 +343,23 @@ def _do_push(text="", confirm=None):
     if not path:
         return False
     try:
-        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], path).stdout.strip()
-        if confirm and not confirm(f"จะ push โปรเจกต์ {name} branch {branch} ขึ้น GitHub ใช่ไหมคะ"):
+        branch = _current_branch(path)
+        has_upstream = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], path).returncode == 0
+        args = ["push"]
+        first_time = ""
+        if not has_upstream:
+            remote = _remote(path)
+            if not remote:
+                _say("โปรเจกต์นี้ยังไม่ได้เชื่อมกับ GitHub ค่ะ ต้องเพิ่ม remote เองก่อน")
+                return False
+            args = ["push", "-u", remote, branch]
+            first_time = " (ครั้งแรกของ branch นี้ จะสร้างบน GitHub ให้ด้วย)"
+        spoken = branch.replace("/", " ")
+        if confirm and not confirm(f"จะ push โปรเจกต์ {name} branch {spoken} ขึ้น GitHub{first_time} ใช่ไหมคะ" + _protected_note(path)):
             _say("ยกเลิกการ push ค่ะ")
             return False
- 
-        res = _git(["push"], path)
+
+        res = _git(args, path)
         if res.returncode == 0:
             _say(f"push โปรเจกต์ {name} ขึ้น GitHub เรียบร้อยแล้วค่ะ")
             return True
@@ -354,3 +393,56 @@ def cmd_commit_push(text="", confirm=None):
     """commit แล้ว push ต่อ (ถามยืนยันแยกกัน และไม่ push ถ้า commit ไม่สำเร็จ)"""
     if _do_commit(text, confirm, quiet=True):
         _do_push(text, confirm)
+
+
+def _branch_name(text, path):
+    """ตั้งชื่ออัตโนมัติ ไม่พึ่งการฟังชื่อไทย:
+    - ใช้เฉพาะตัวอักษรอังกฤษ/ตัวเลขจากที่พูดหลังคำว่า "ชื่อ"/"ว่า" (ภาษาไทยทิ้ง)
+    - ไม่มีชื่อ -> ใช้วันที่เวลา เช่น feature/20261021-1530
+    - ขึ้นต้น fix/ ถ้าพูดถึง fix/bug/บั๊ก ไม่งั้น feature/"""
+    low = (text or "").lower()
+    prefix = "fix" if re.search(r"(?<![a-z])(fix|bug|hotfix)(?![a-z])|บั๊ก|บัค", low) else "feature"
+    m = re.search(r"(?:ชื่อ|ว่า|named|name)\s*(.+)$", low)
+    slug = re.sub(r"[^a-z0-9]+", "-", m.group(1)).strip("-")[:30] if m else ""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    base = f"{prefix}/{slug or stamp}"
+    if _git(["check-ref-format", "--branch", base], path).returncode != 0:
+        base = f"{prefix}/{stamp}"
+
+    name, n = base, 2
+    while _git(["show-ref", "--verify", "--quiet", f"refs/heads/{name}"], path).returncode == 0:
+        name, n = f"{base}-{n}", n + 1                      # ชื่อซ้ำ -> ต่อท้าย -2, -3
+    return name
+
+
+def cmd_new_branch(text="", confirm=None):
+    """สร้าง branch ใหม่จาก branch ปัจจุบันแล้วสลับไปเลย (ไฟล์ที่แก้ค้างอยู่ติดไปด้วย)"""
+    name, path = _prepare(text)
+    if not path:
+        return
+    try:
+        cur = _current_branch(path)
+        if cur == "HEAD":
+            _say("ตอนนี้ไม่ได้อยู่บน branch ไหนค่ะ (detached HEAD) ให้สลับกลับไปที่ branch ก่อน")
+            return
+
+        branch = _branch_name(text, path)
+        n = len(_changes(path))
+        spoken = branch.replace("/", " ")
+        prompt = f"จะสร้าง branch {spoken} จาก {cur} ในโปรเจกต์ {name} ใช่ไหมคะ"
+        if n:
+            prompt += f" ไฟล์ที่แก้ค้างอยู่ {n} ไฟล์จะติดไปด้วย"
+        print(f"🌿 [git] ชื่อ branch ที่จะสร้าง: {branch}")
+        if confirm and not confirm(prompt):
+            _say("ยกเลิกการสร้าง branch ค่ะ")
+            return
+
+        res = _git(["checkout", "-b", branch], path)
+        if res.returncode != 0:
+            print(res.stderr or res.stdout)
+            _say("สร้าง branch ไม่สำเร็จค่ะ ดูรายละเอียดในหน้าจอ")
+            return
+        print(f"🌿 [git] ตอนนี้อยู่ที่ {branch}  (อยากเปลี่ยนชื่อ: git branch -m ชื่อใหม่)")
+        _say(f"สร้าง branch {spoken} และสลับไปแล้วค่ะ")
+    except subprocess.TimeoutExpired:
+        _say("git ตอบช้าเกินไปค่ะ ลองใหม่อีกครั้งนะคะ")
