@@ -21,7 +21,10 @@ DEBUG_MIC = True
 # LLM (ลำดับในนี้ = ลำดับที่ลอง: Groq ก่อน แล้วค่อย Gemini)
 # รันคำสั่ง `python llm.py` เพื่อดูรายชื่อโมเดลที่ใช้ได้จริงกับ key ของคุณ
 # =====================================================================
-LLM_PROVIDERS = ("groq", "gemini")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODELS = ["claude-haiku-5-5"]          # fast
+CLAUDE_SMART_MODELS = ["claude-sonnet-5-5"]   # smart
+LLM_PROVIDERS = ["groq", "claude", "gemini"]
 LLM_TIMEOUT_SEC = 8
 LLM_MAX_TOKENS = 600          # gpt-oss นับ token ที่ใช้คิดรวมด้วย จึงตั้งเผื่อไว้
 
