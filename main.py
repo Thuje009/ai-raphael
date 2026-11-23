@@ -35,6 +35,19 @@ DEFAULT_CONFIG = {
     "telegram_bot_token": "",
 }
 
+LOG_PATH = os.path.join(BASE_DIR, "command_log.jsonl")
+
+
+def log_unhandled(text, result):
+    """เก็บประโยคที่ไม่ได้ถูกแปลงเป็นคำสั่ง (ไว้เติม alias และตัวอย่างใน prompt)"""
+    try:
+        r = result or {}
+        if r.get("intent") in ("unknown", "answer") or r.get("llm_failed"):
+            row = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "text": text, "result": r}
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 def load_config():
     """โหลด config.json (เติมค่า default ให้คีย์ที่ขาด)"""
@@ -56,6 +69,7 @@ def run_command(text):
     set_widget_state("thinking")        # สีม่วง
     try:
         intent_result = interpret(text)
+        log_unhandled(text, intent_result)
         print(f"🤖 ผลลัพธ์: {intent_result}")
         # การแปลภาษาจัดการผ่าน intent "translate_text" ใน COMMANDS แล้ว
         return handle_command(intent_result, text)

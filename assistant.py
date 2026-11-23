@@ -51,6 +51,12 @@ LIVE_NOTE_MIN_SCORE = 0.25                        # คำถามข้อม�
 LLM_DOWN_REPLY = "ระบบคิดขัดข้องชั่วคราวค่ะ ลองใหม่อีกครั้งนะคะ"
 QUESTION_CUES = r"(อะไร|เมื่อไหร่|เมื่อไร|ไหม|หรือเปล่า|หรือไม่|ที่ไหน|กี่|ยังไง|อย่างไร|ใคร)"
 
+CONFIRM_PROMPTS = {
+    "sleep_pc": "ยืนยันพักเครื่องไหมคะ",
+    "close_other_windows": "ยืนยันปิดหน้าต่างอื่นทั้งหมดไหมคะ",
+    "close_chrome": "ยืนยันปิด Chrome ทั้งหมดไหมคะ",
+}
+
 # =====================================================================
 # Text & Wake Word Helpers
 # =====================================================================
@@ -61,7 +67,8 @@ def has_open(text):
     return "เปิด" in text
 
 def has_any(text, words):
-    return any(w in text for w in words)
+    t = (text or "").lower()          # Whisper มักคืน "Chrome", "YouTube", "OK" ตัวใหญ่ จึงต้อง lower
+    return any(w.lower() in t for w in words)
 
 def find_wake_word(text):
     return next((w for w in sorted(WAKE_WORDS, key=len, reverse=True) if w in text), None)
@@ -203,38 +210,82 @@ def interpret_basic(text):
     if has_any(text, ["สแกนไวรัส", "ตรวจไวรัส", "หาไฟล์อันตราย", "เช็กไวรัส", "สแกนเครื่อง"]):
         return result("scan_virus")
     
+
     # =====================================================================
-    # --- git: สั่งได้เฉพาะ keyword เท่านั้น (ไม่อยู่ใน INTENTS ของ LLM กันโมเดลสั่งเอง) ---
-    # STT ฟังคำอังกฤษเพี้ยนบ่อย (commit -> comic) จึงมี 2 ระดับ:
-    #   คำชัด -> จับได้เลย / คำที่ฟังเพี้ยน -> ต้องมีคำว่า code/โค้ด/git อยู่ด้วยถึงจะนับ (กัน "comic" จริง ๆ)
+    # --- git: สั่งได้เฉพาะ keyword เท่านั้น ---
     # =====================================================================
+
     low = text.lower()
-    code_words = has_any(low, ["code", "โค้ด", "โค๊ด", "โค๊ต", "โค้ต", "โคด", "git", "กิต", "github", "กิตฮับ", "กิทฮับ",
-                               "โปรเจกต์", "โปรเจค"])
-    # branch: คำชัด + "สาขา" (คำไทยที่ STT ฟังแม่น) / คำที่ฟังเพี้ยน (แบรนด์, บ้าน ฯลฯ) นับเมื่อมีบริบทโค้ด
-    # หรือกำลังเปิด VS Code/terminal อยู่ (คำสั่งนี้ถามยืนยันก่อนสร้างเสมอ จึงปลอดภัยถ้าจับพลาด)
-    branch_hit = has_any(low, ["branch", "บรานช์", "แบรนช์", "แบรนซ์", "บรานซ์", "บราญช์",
-                               "สร้างสาขา", "แตกสาขา", "แยกสาขา", "สาขาใหม่"]) or (
-        (code_words or _dev_context()) and has_any(low, ["แบรนด์", "brand", "แบรน", "บราน", "บ้านใหม่", "สร้างบ้าน", "แยกบ้าน", "แตกบ้าน"]))
-    if branch_hit and has_any(low, ["สร้าง", "แยก", "แตก", "ใหม่", "new", "create"]):
-        return result("git_new_branch", text)
-    commit_hit = has_any(low, ["commit", "คอมมิต", "คอมมิท", "คอมมิ๊ต"]) or (
-        code_words and has_any(low, ["comit", "commet", "comet", "comic", "คอมมิก", "คอมมิค", "คอมมิด", "โคมิต"]))
-    # push: คำชัด / วลีไทยที่ STT ฟังแม่น / คำที่ฟังเพี้ยน (พูด, food ฯลฯ) นับเมื่อมีบริบทโค้ดหรือ commit อยู่ด้วย
-    push_hit = (
-        has_any(low, ["push", "พุช", "พุด", "ปุช", "ขึ้น github", "ขึ้นกิตฮับ", "ขึ้นกิทฮับ", "อัปโหลดโค้ด", "อัพโหลดโค้ด", "ส่งโค้ดขึ้น"])
-        or ((code_words or commit_hit) and has_any(low, ["พูด", "food", "foot", "pooch", "bush", "put", "fush", "พุก", "ปูช"]))
+
+    # คำที่เกี่ยวข้องกับ Code / Git
+    code_words = has_any(low, [
+        "code", "โค้ด", "โค๊ด", "โค๊ต", "โค้ต", "โคด",
+        "git", "กิต", "github", "กิตฮับ", "กิทฮับ",
+        "โปรเจกต์", "โปรเจค"
+    ])
+
+    # STT ฟัง code เพี้ยน
+    code_fuzzy = ["foot", "ฟุต", "โค้ท", "coat", "cold"]
+
+    # ต้องกำหนด code_words ก่อนนำมาใช้
+    code_ctx = code_words or has_any(low, code_fuzzy)
+
+    # branch
+    branch_hit = has_any(low, [
+        "branch", "บรานช์", "แบรนช์", "แบรนซ์",
+        "บรานซ์", "บราญช์",
+        "สร้างสาขา", "แตกสาขา", "แยกสาขา", "สาขาใหม่"
+    ]) or (
+        (code_words or _dev_context()) and has_any(low, [
+            "แบรนด์", "brand", "แบรน", "บราน",
+            "บ้านใหม่", "สร้างบ้าน", "แยกบ้าน", "แตกบ้าน"
+        ])
     )
+
+    if branch_hit and has_any(low, [
+        "สร้าง", "แยก", "แตก", "ใหม่", "new", "create"
+    ]):
+        return result("git_new_branch", text)
+
+    # commit
+    commit_hit = has_any(low, [
+        "commit", "คอมมิต", "คอมมิท", "คอมมิ๊ต"
+    ]) or (
+        code_ctx and has_any(low, [
+            "comit", "commet", "comet", "comic",
+            "คอมมิก", "คอมมิค", "คอมมิด", "โคมิต"
+        ])
+    )
+
+    # push
+    push_hit = (
+        has_any(low, [
+            "push", "พุช", "พุด", "ปุช",
+            "ขึ้น github", "ขึ้นกิตฮับ", "ขึ้นกิทฮับ",
+            "อัปโหลดโค้ด", "อัพโหลดโค้ด", "ส่งโค้ดขึ้น"
+        ])
+        or (
+            (code_ctx or commit_hit) and has_any(low, [
+                "พูด", "food", "pooch", "bush",
+                "put", "fush", "พุก", "ปูช"
+            ])
+        )
+    )
+
     if commit_hit and push_hit:
         return result("git_commit_push", text)
+
     if commit_hit:
         return result("git_commit", text)
+
     if push_hit:
         return result("git_push", text)
+
     if has_any(low, ["git status", "สถานะ git", "สถานะโค้ด"]):
         return result("git_status", text)
- 
- 
+
+    
+    
  
     # =====================================================================
     # 11) ควบคุมราฟาเอล (ปิดโปรแกรมตัวเอง)
@@ -364,11 +415,14 @@ CONFIRM_YES, CONFIRM_NO = ["ยืนยัน", "ใช่", "ตกลง", "�
 
 def confirm(question):
     speak(question)
-    return has_any(record_and_recognize("พูดว่า 'ยืนยัน' หรือ 'ยกเลิก'..."), CONFIRM_YES) and not has_any(record_and_recognize(), CONFIRM_NO)
-
+    ans = record_and_recognize("พูดว่า 'ยืนยัน' หรือ 'ยกเลิก'...") or ""
+    return has_any(ans, CONFIRM_YES) and not has_any(ans, CONFIRM_NO)
 def run_and_say(message, action):
-    return lambda _q: (speak(message), GUI_LOCK.acquire(), action(), GUI_LOCK.release()) if hasattr(GUI_LOCK, 'acquire') else lambda _q: (speak(message), action())
-
+    def run(_q):
+        speak(message)
+        with GUI_LOCK:
+            action()
+    return run
 def paste_text(text):
     pyperclip.copy(text)
     with GUI_LOCK: pyautogui.hotkey("ctrl", "v")
@@ -581,8 +635,12 @@ def handle_command(intent_data, raw_text=""):
     if intent == "answer":
         speak(intent_data.get("answer") or "ขออภัยค่ะ ดิฉันยังไม่มีคำตอบ")
         return False
-
     handler = COMMANDS.get(intent)
+    
+    if intent in CONFIRM_PROMPTS and not confirm(CONFIRM_PROMPTS[intent]):
+        speak("ยกเลิกให้แล้วค่ะ")
+        return False
+    
     if handler:
         handler(query)
     else:

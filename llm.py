@@ -12,7 +12,7 @@ import time
 import requests
 
 from persona import PERSONA_PROMPT, PERSONA_SEARCHABLE
-from config import (GROQ_API_KEY, GROQ_MODELS, GEMINI_API_KEY, GEMINI_MODELS,
+from config import (ANTHROPIC_API_KEY, CLAUDE_MODELS, CLAUDE_SMART_MODELS, GROQ_API_KEY, GROQ_MODELS, GEMINI_API_KEY, GEMINI_MODELS,
                     LLM_PROVIDERS, LLM_TIMEOUT_SEC, LLM_MAX_TOKENS,
                     GROQ_SMART_MODELS, GEMINI_SMART_MODELS, GROQ_REASONING_FAST, GROQ_REASONING_SMART,
                     LLM_MAX_TOKENS_SMART, LLM_TIMEOUT_SMART_SEC, SMART_MIN_CHARS,
@@ -155,6 +155,34 @@ def _groq_chat(model, system, user, history=()):
         raise LLMError(r.status_code, r.text[:200], r.headers.get("retry-after"))
     return r.json()["choices"][0]["message"].get("content") or ""
 
+# ---------------------------------------------------------------------
+# Provider: Claude (Anthropic)
+# ---------------------------------------------------------------------
+CLAUDE_URL = "https://api.anthropic.com/v1/messages"
+
+def _claude_chat(model, system, user, history=()):
+    smart = model in CLAUDE_SMART_MODELS
+    messages = []
+    for u, a in history:
+        messages.append({"role": "user", "content": u})
+        messages.append({"role": "assistant", "content": _history_json(a)})
+    messages.append({"role": "user", "content": user})
+    payload = {
+        "model": model,
+        "system": system,
+        "messages": messages,
+        "max_tokens": LLM_MAX_TOKENS_SMART if smart else LLM_MAX_TOKENS,
+        "temperature": 0.2,
+    }
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01"}
+    r = requests.post(CLAUDE_URL, json=payload, headers=headers,
+                      timeout=LLM_TIMEOUT_SMART_SEC if smart else LLM_TIMEOUT_SEC)
+    if r.status_code != 200:
+        raise LLMError(r.status_code, r.text[:200], r.headers.get("retry-after"))
+    return "".join(b.get("text", "") for b in r.json().get("content", [])
+                   if b.get("type") == "text")
+
+
 
 # ---------------------------------------------------------------------
 # Provider: Gemini
@@ -203,18 +231,28 @@ def _gemini_chat(model, system, user, history=()):
 # Core
 # ---------------------------------------------------------------------
 def _models(provider, tier):
-    fast = GROQ_MODELS if provider == "groq" else GEMINI_MODELS
-    smart = GROQ_SMART_MODELS if provider == "groq" else GEMINI_SMART_MODELS
+    if provider == "groq":
+        fast, smart = GROQ_MODELS, GROQ_SMART_MODELS
+    elif provider == "claude":
+        fast, smart = CLAUDE_MODELS, CLAUDE_SMART_MODELS
+    else:
+        fast, smart = GEMINI_MODELS, GEMINI_SMART_MODELS
     if tier == "smart":
-        return list(dict.fromkeys(list(smart) + list(fast)))     # ตัวฉลาดก่อน ล่มแล้วถอยไปตัวเร็ว
+        return list(dict.fromkeys(list(smart) + list(fast)))
     return list(fast)
 
 
 def _providers(tier="fast"):
+    order = list(LLM_PROVIDERS)
+    if tier == "smart" and "claude" in order:       # smart ให้ Claude ขึ้นก่อน
+        order.remove("claude")
+        order.insert(0, "claude")
     chain = []
-    for name in LLM_PROVIDERS:
+    for name in order:
         if name == "groq" and GROQ_API_KEY:
             chain.append(("groq", _models("groq", tier), _groq_chat))
+        elif name == "claude" and ANTHROPIC_API_KEY:
+            chain.append(("claude", _models("claude", tier), _claude_chat))
         elif name == "gemini" and GEMINI_API_KEY:
             chain.append(("gemini", _models("gemini", tier), _gemini_chat))
     return chain
