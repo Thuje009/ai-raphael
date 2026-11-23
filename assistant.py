@@ -230,6 +230,43 @@ def interpret_basic(text):
     # ต้องกำหนด code_words ก่อนนำมาใช้
     code_ctx = code_words or has_any(low, code_fuzzy)
 
+
+
+        # Git: Commit + Push ในคำสั่งเดียว
+    git_sync_phrases = [
+        "commit and push",
+        "commit แล้ว push",
+        "commit กับ push",
+        "commit push",
+        "push code",
+        "post code",
+        "postcode",
+        "โพสต์โค้ด",
+        "โพสโค้ด",
+        "ส่งโค้ดขึ้น",
+        "ขึ้น github",
+        "ขึ้นกิตฮับ",
+        "อัปโหลดโค้ด",
+        "อัพโหลดโค้ด",
+        "push โปรเจกต์",
+        "push project",
+        "บันทึกโค้ดขึ้น github",
+        "อัปเดตโปรเจกต์ขึ้น github",
+    ]
+
+    git_sync_hit = (
+        has_any(low, git_sync_phrases)
+        or (
+            code_ctx and has_any(low, [
+                "ส่งขึ้น", "อัปขึ้น", "อัพขึ้น",
+                "โพสต์", "โพส"
+            ])
+        )
+    )
+
+    if git_sync_hit:
+        return result("git_commit_push", text)
+        
     # branch
     branch_hit = has_any(low, [
         "branch", "บรานช์", "แบรนช์", "แบรนซ์",
@@ -267,10 +304,14 @@ def interpret_basic(text):
         or (
             (code_ctx or commit_hit) and has_any(low, [
                 "พูด", "food", "pooch", "bush",
-                "put", "fush", "พุก", "ปูช"
+                "put", "fush", "พุก", "ปูช",
+                "post code", "postcode", "postcode",
+                "โพสต์โค้ด", "โพสโค้ด", "โพสต์ code",
+                "post โค้ด"
             ])
         )
     )
+
 
     if commit_hit and push_hit:
         return result("git_commit_push", text)
